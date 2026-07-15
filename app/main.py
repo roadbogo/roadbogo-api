@@ -1,35 +1,55 @@
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.database import get_db
+
 from app.api.v1.router import api_router
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.exception_handlers import (
+    app_exception_handler,
+    http_exception_handler,
+    validation_exception_handler,
+)
+from app.core.exceptions import AppException
+from app.core.logging import configure_logging
+from app.middleware.request_context import RequestContextMiddleware
 
 
 def create_app() -> FastAPI:
+    configure_logging(settings.log_level)
+
     app = FastAPI(
         title=settings.app_name,
-        version="0.1.0",
+        version=settings.app_version,
         docs_url="/docs",
         redoc_url="/redoc",
+        openapi_url="/openapi.json",
     )
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.backend_cors_origins,
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            "X-Request-ID",
+            "X-Trace-ID",
+        ],
     )
+    app.add_middleware(RequestContextMiddleware)
 
-    app.include_router(api_router, prefix="/api/v1")
-
-    @app.get("/health", tags=["health"])
-    async def health_check() -> dict[str, str]:
-        return {"status": "ok", "service": settings.app_name}
+    app.add_exception_handler(AppException, app_exception_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+    app.include_router(api_router, prefix=settings.api_v1_prefix)
 
     @app.get("/health/db", tags=["health"])
     def database_health_check(db: Session = Depends(get_db)) -> dict[str, str]:
