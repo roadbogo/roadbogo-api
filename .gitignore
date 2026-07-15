@@ -6,4 +6,8 @@ __pycache__/
 venv/
 .env
 .DS_Store
+
+# Python package metadata
 *.egg-info/
+build/
+dist/

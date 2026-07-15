@@ -1,9 +1,8 @@
 from functools import lru_cache
 from typing import Annotated, Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, AliasChoices
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -14,7 +13,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = Field(
-        default="도로보GO API",
+        default="roadbogo-api",
         validation_alias="APP_NAME",
     )
     app_env: str = Field(
@@ -43,6 +42,10 @@ class Settings(BaseSettings):
         validation_alias="LOG_LEVEL",
     )
 
+    db_name: str = Field(
+        default="roadbogo",
+        validation_alias=AliasChoices("DB_NAME", "DB_SCHEME"),
+    )
     db_host: str = Field(
         default="localhost",
         validation_alias="DB_HOST",
@@ -63,6 +66,7 @@ class Settings(BaseSettings):
         default="roadbogo",
         validation_alias="DB_SCHEME",
     )
+    db_echo: bool = False
 
     minio_endpoint: str = Field(
         default="192.168.0.101:9000",
