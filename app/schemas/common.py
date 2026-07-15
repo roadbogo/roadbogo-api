@@ -1,4 +1,4 @@
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
@@ -6,7 +6,7 @@ DataT = TypeVar("DataT")
 
 
 class SuccessResponse(BaseModel, Generic[DataT]):
-    success: bool
+    success: Literal[True]
     data: DataT | None = None
     message: str | None = None
     trace_id: str
@@ -19,6 +19,6 @@ class ErrorDetail(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    success: bool
+    success: Literal[False]
     error: ErrorDetail
     trace_id: str
