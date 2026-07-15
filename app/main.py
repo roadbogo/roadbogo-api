@@ -1,12 +1,7 @@
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
-
-from app.core.database import get_db
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -49,15 +44,8 @@ def create_app() -> FastAPI:
     app.add_exception_handler(AppException, app_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
-    app.include_router(api_router, prefix=settings.api_v1_prefix)
 
-    @app.get("/health/db", tags=["health"])
-    def database_health_check(db: Session = Depends(get_db)) -> dict[str, str]:
-        try:
-            db.execute(text("SELECT 1"))
-        except SQLAlchemyError as exc:
-            raise HTTPException(status_code=503, detail="Database connection failed") from exc
-        return {"status": "ok", "database": settings.db_scheme}
+    app.include_router(api_router, prefix=settings.api_v1_prefix)
 
     return app
 
