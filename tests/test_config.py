@@ -37,3 +37,74 @@ def test_cors_origins_rejects_wildcard_origin(monkeypatch: pytest.MonkeyPatch) -
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_auth_jwt_secret_key_is_optional() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.auth_jwt_secret_key is None
+
+
+def test_auth_jwt_secret_key_repr_does_not_expose_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "x" * 32
+    monkeypatch.setenv("AUTH_JWT_SECRET_KEY", secret)
+
+    settings = Settings(_env_file=None)
+
+    assert secret not in repr(settings.auth_jwt_secret_key)
+    assert settings.auth_jwt_secret_key is not None
+    assert settings.auth_jwt_secret_key.get_secret_value() == secret
+
+
+def test_auth_settings_accept_environment_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_JWT_SECRET_KEY", "y" * 32)
+    monkeypatch.setenv("AUTH_JWT_ISSUER", "issuer")
+    monkeypatch.setenv("AUTH_JWT_AUDIENCE", "audience")
+    monkeypatch.setenv("AUTH_ACCESS_TOKEN_EXPIRE_MINUTES", "45")
+    monkeypatch.setenv("AUTH_REFRESH_TOKEN_EXPIRE_DAYS", "14")
+    monkeypatch.setenv("AUTH_REFRESH_COOKIE_NAME", "refresh")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.auth_jwt_issuer == "issuer"
+    assert settings.auth_jwt_audience == "audience"
+    assert settings.auth_access_token_expire_minutes == 45
+    assert settings.auth_refresh_token_expire_days == 14
+    assert settings.auth_refresh_cookie_name == "refresh"
+
+
+def test_auth_jwt_secret_key_rejects_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_JWT_SECRET_KEY", "   ")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_auth_expiration_values_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_ACCESS_TOKEN_EXPIRE_MINUTES", "0")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+    monkeypatch.delenv("AUTH_ACCESS_TOKEN_EXPIRE_MINUTES")
+    monkeypatch.setenv("AUTH_REFRESH_TOKEN_EXPIRE_DAYS", "0")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_auth_jwt_algorithm_only_allows_hs256(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_JWT_ALGORITHM", "RS256")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
