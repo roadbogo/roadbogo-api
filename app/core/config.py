@@ -1,8 +1,8 @@
 from functools import lru_cache
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
         default="/api/internal/v1",
         validation_alias="INTERNAL_API_V1_PREFIX",
     )
-    cors_origins: list[str] = Field(
+    cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         validation_alias="CORS_ORIGINS",
     )
@@ -32,14 +32,21 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, value: Any) -> list[str] | Any:
         if isinstance(value, str):
             origins = [origin.strip() for origin in value.split(",") if origin.strip()]
-            if "*" in origins:
-                msg = "CORS_ORIGINS cannot include '*' when credentials are enabled."
-                raise ValueError(msg)
+            cls.validate_cors_origins(origins)
             return origins
-        if isinstance(value, list) and "*" in value:
+        if isinstance(value, list):
+            cls.validate_cors_origins(value)
+            return value
+        return value
+
+    @staticmethod
+    def validate_cors_origins(origins: list[str]) -> None:
+        if not origins:
+            msg = "CORS_ORIGINS must include at least one origin."
+            raise ValueError(msg)
+        if "*" in origins:
             msg = "CORS_ORIGINS cannot include '*' when credentials are enabled."
             raise ValueError(msg)
-        return value
 
 
 @lru_cache

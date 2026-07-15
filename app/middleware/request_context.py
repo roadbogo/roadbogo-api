@@ -1,7 +1,7 @@
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
@@ -21,7 +21,10 @@ def normalize_context_id(value: str | None) -> str:
     cleaned = value.strip()
     if not cleaned or len(cleaned) > MAX_CONTEXT_HEADER_LENGTH:
         return str(uuid4())
-    return cleaned
+    try:
+        return str(UUID(cleaned))
+    except ValueError:
+        return str(uuid4())
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
@@ -41,6 +44,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             status_code = response.status_code
         except Exception:
+            status_code = 500
             logger.exception(
                 "Unhandled exception request_id=%s trace_id=%s",
                 request_id,

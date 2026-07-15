@@ -1,4 +1,5 @@
 import re
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
@@ -25,14 +26,16 @@ def test_health_check_success_response() -> None:
     assert UTC_Z_PATTERN.match(body["data"]["server_time"])
     assert response.headers["X-Request-ID"]
     assert response.headers["X-Trace-ID"] == body["trace_id"]
+    UUID(body["trace_id"])
 
 
-def test_request_id_header_is_preserved() -> None:
+def test_request_id_header_is_preserved_when_uuid() -> None:
     client = TestClient(create_app())
+    request_id = str(uuid4())
 
-    response = client.get("/api/v1/health", headers={"X-Request-ID": "request-123"})
+    response = client.get("/api/v1/health", headers={"X-Request-ID": request_id})
 
-    assert response.headers["X-Request-ID"] == "request-123"
+    assert response.headers["X-Request-ID"] == request_id
     assert response.json()["trace_id"] == response.headers["X-Trace-ID"]
 
 
@@ -70,6 +73,7 @@ def test_unhandled_error_uses_common_500_response() -> None:
     assert body["trace_id"]
     assert response.headers["X-Request-ID"]
     assert response.headers["X-Trace-ID"] == body["trace_id"]
+    UUID(body["trace_id"])
 
 
 def test_validation_error_uses_common_response() -> None:
@@ -91,3 +95,21 @@ def test_validation_error_uses_common_response() -> None:
     assert body["error"]["code"] == "COMMON_VALIDATION_ERROR"
     assert body["error"]["details"]["fields"]
     assert body["trace_id"]
+
+
+def test_health_route_is_registered_once() -> None:
+    client = TestClient(create_app())
+    paths = client.get("/openapi.json").json()["paths"]
+
+    assert list(paths).count("/api/v1/health") == 1
+
+
+def test_health_openapi_uses_success_response_schema() -> None:
+    client = TestClient(create_app())
+
+    schema = client.get("/openapi.json").json()
+    response_schema = schema["paths"]["/api/v1/health"]["get"]["responses"]["200"][
+        "content"
+    ]["application/json"]["schema"]
+
+    assert response_schema["$ref"].endswith("SuccessResponse_HealthData_")

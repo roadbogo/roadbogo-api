@@ -1,4 +1,3 @@
-import logging
 from typing import Any
 
 from fastapi import Request
@@ -6,10 +5,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.core.exceptions import ERROR_MESSAGES, AppException
+from app.core.exceptions import ERROR_MESSAGES, UNKNOWN_HTTP_ERROR, AppException
 from app.core.responses import error_response
-
-logger = logging.getLogger("roadbogo.api")
 
 
 def get_trace_id(request: Request) -> str:
@@ -48,10 +45,7 @@ async def http_exception_handler(
     request: Request,
     exc: StarletteHTTPException,
 ) -> JSONResponse:
-    code, message = ERROR_MESSAGES.get(
-        exc.status_code,
-        ERROR_MESSAGES[400],
-    )
+    code, message = ERROR_MESSAGES.get(exc.status_code, UNKNOWN_HTTP_ERROR)
     return build_error_response(
         status_code=exc.status_code,
         code=code,
@@ -77,20 +71,5 @@ async def validation_exception_handler(
         code=code,
         message=message,
         details={"fields": fields},
-        trace_id=get_trace_id(request),
-    )
-
-
-async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception(
-        "Unhandled exception request_id=%s trace_id=%s",
-        getattr(request.state, "request_id", ""),
-        get_trace_id(request),
-    )
-    code, message = ERROR_MESSAGES[500]
-    return build_error_response(
-        status_code=500,
-        code=code,
-        message=message,
         trace_id=get_trace_id(request),
     )
