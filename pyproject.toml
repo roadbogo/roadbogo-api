@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "roadbogo-api"
 version = "0.1.0"
@@ -5,6 +9,7 @@ description = "Roadbogo service API"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",
+  "alembic>=1.13.0,<2.0",
   "minio>=7.2.0",
   "pydantic>=2.0.0",
   "pydantic-settings>=2.4.0",
@@ -27,3 +32,8 @@ target-version = "py311"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+exclude = ["migrations*", "tests*"]
