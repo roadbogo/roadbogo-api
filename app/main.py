@@ -32,12 +32,22 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": settings.app_name}
 
     @app.get("/health/db", tags=["health"])
-    def database_health_check(db: Session = Depends(get_db)) -> dict[str, str]:
+    def database_health_check(
+        db: Session = Depends(get_db),
+    ) -> dict[str, str]:
         try:
-            db.execute(text("SELECT 1"))
+            result = db.execute(text("SELECT 1"))
+            result.scalar_one()
         except SQLAlchemyError as exc:
-            raise HTTPException(status_code=503, detail="Database connection failed") from exc
-        return {"status": "ok", "database": settings.db_scheme}
+            raise HTTPException(
+                status_code=503,
+                detail="Database connection failed",
+            ) from exc
+
+        return {
+            "status": "ok",
+            "database": settings.db_name,
+        }
 
     return app
 
