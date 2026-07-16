@@ -1,7 +1,7 @@
 import app.models  # noqa: F401
 
 from sqlalchemy import JSON
-from sqlalchemy.dialects.mysql import BIGINT, DATETIME, INTEGER, SMALLINT
+from sqlalchemy.dialects.mysql import BIGINT, CHAR, DATETIME, INTEGER, SMALLINT, TINYINT
 from sqlalchemy.orm import configure_mappers
 
 from app.core.database import Base
@@ -106,3 +106,20 @@ def test_foreign_key_names_and_delete_policies_are_explicit() -> None:
         "RESTRICT",
         "SET NULL",
     }
+
+
+def test_auth_account_columns_are_registered() -> None:
+    users = Base.metadata.tables["users"]
+    sessions = Base.metadata.tables["user_sessions"]
+
+    assert isinstance(users.c.password_reset_token_hash.type, CHAR)
+    assert users.c.password_reset_token_hash.type.length == 64
+    assert isinstance(users.c.password_reset_token_expires_at.type, DATETIME)
+    assert isinstance(users.c.password_changed_at.type, DATETIME)
+    assert isinstance(sessions.c.is_persistent.type, TINYINT)
+    assert sessions.c.is_persistent.nullable is False
+
+    assert {
+        constraint.name
+        for constraint in users.constraints
+    } >= {"uk_users_password_reset_token_hash"}
