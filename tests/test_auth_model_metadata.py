@@ -2,6 +2,7 @@ import app.models  # noqa: F401
 
 from sqlalchemy import JSON
 from sqlalchemy.dialects.mysql import BIGINT, DATETIME, INTEGER, SMALLINT
+from sqlalchemy.orm import configure_mappers
 
 from app.core.database import Base
 
@@ -54,8 +55,12 @@ EXPECTED_TABLES = {
 }
 
 
-def test_mvp_models_are_registered() -> None:
+def test_domain_models_are_registered() -> None:
     assert set(Base.metadata.tables) == EXPECTED_TABLES
+
+
+def test_model_relationships_are_configured() -> None:
+    configure_mappers()
 
 
 def test_mvp_constraint_and_lookup_index_counts() -> None:
