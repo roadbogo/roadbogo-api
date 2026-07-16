@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.api.v1 import auth as auth_api
 from app.core.database import get_db
+from app.core.exceptions import AppException
 from app.dependencies.auth import CurrentUser, get_current_user
 from app.main import create_app
 from app.schemas.auth import AuthTokenData, UserSummary
@@ -131,6 +132,31 @@ def test_refresh_rotates_cookie_and_logout_deletes_cookie(monkeypatch) -> None:
     assert response.status_code == 200
     assert revoked == ["raw-refresh-token"]
     assert "max-age=0" in response.headers["set-cookie"].lower()
+
+
+def test_refresh_failure_returns_common_error_and_deletes_cookie(monkeypatch) -> None:
+    def raise_invalid_refresh(db, refresh_token):
+        raise AppException(
+            status_code=401,
+            code="AUTH_REFRESH_TOKEN_INVALID",
+            message="Invalid refresh token.",
+        )
+
+    monkeypatch.setattr(auth_api.auth_service, "refresh_access_token", raise_invalid_refresh)
+    client = client_with_dummy_db()
+    client.cookies.set("roadbogo_refresh_token", "old-refresh-token", path="/api/v1/auth")
+
+    response = client.post("/api/v1/auth/refresh")
+    body = response.json()
+    cookie = response.headers["set-cookie"].lower()
+
+    assert response.status_code == 401
+    assert body["success"] is False
+    assert body["error"]["code"] == "AUTH_REFRESH_TOKEN_INVALID"
+    assert body["trace_id"]
+    assert "max-age=0" in cookie or "expires=" in cookie
+    assert "path=/api/v1/auth" in cookie
+    assert "old-refresh-token" not in response.text
 
 
 def test_me_uses_current_user_dependency() -> None:

@@ -1,10 +1,12 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.exception_handlers import build_error_response
 from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.dependencies.auth import CurrentUser, get_current_user
@@ -85,15 +87,22 @@ def refresh(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     try:
         result = auth_service.refresh_access_token(
             db,
             request.cookies.get(settings.auth_refresh_cookie_name),
         )
-    except AppException:
-        _delete_refresh_cookie(response)
-        raise
+    except AppException as exc:
+        error_response = build_error_response(
+            status_code=exc.status_code,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details,
+            trace_id=request.state.trace_id,
+        )
+        _delete_refresh_cookie(error_response)
+        return error_response
     _set_refresh_cookie(response, result)
     return success_response(data=result.data.model_dump(), trace_id=request.state.trace_id)
 

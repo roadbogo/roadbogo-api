@@ -180,12 +180,17 @@ def issue_auth_tokens(
 ) -> RefreshResult:
     now = utc_now_naive()
     raw_refresh_token = generate_refresh_token()
+    refresh_token_hash = hash_refresh_token(raw_refresh_token)
     expires_at = get_refresh_token_expires_at(now=datetime.now(UTC)).replace(tzinfo=None)
+    previous_refresh_token_hash = session.refresh_token_hash if session is not None else None
+    previous_expires_at = session.expires_at if session is not None else None
+    previous_last_login_at = user.last_login_at
+
     if session is None:
         session = UserSession(
             public_id=str(uuid4()),
             user_id=user.user_id,
-            refresh_token_hash=hash_refresh_token(raw_refresh_token),
+            refresh_token_hash=refresh_token_hash,
             client_type=CLIENT_TYPE_WEB,
             expires_at=expires_at,
             is_persistent=1 if remember_me else 0,
@@ -194,15 +199,26 @@ def issue_auth_tokens(
         )
         db.add(session)
     else:
-        session.refresh_token_hash = hash_refresh_token(raw_refresh_token)
+        session.refresh_token_hash = refresh_token_hash
         session.expires_at = expires_at
         remember_me = bool(session.is_persistent)
 
-    user.last_login_at = now
-    db.commit()
-    db.refresh(session)
-    db.refresh(user)
-    access_token = create_access_token(user.public_id, session.public_id)
+    try:
+        user.last_login_at = now
+        db.flush()
+        access_token = create_access_token(user.public_id, session.public_id)
+        user_summary = collect_user_summary(db, user)
+        db.commit()
+        db.refresh(session)
+        db.refresh(user)
+    except Exception:
+        db.rollback()
+        if previous_refresh_token_hash is not None:
+            session.refresh_token_hash = previous_refresh_token_hash
+            session.expires_at = previous_expires_at
+        user.last_login_at = previous_last_login_at
+        raise
+
     expires_in = settings.auth_access_token_expire_minutes * 60
     return RefreshResult(
         raw_refresh_token=raw_refresh_token,
@@ -211,7 +227,7 @@ def issue_auth_tokens(
             access_token=access_token,
             token_type="Bearer",
             expires_in=expires_in,
-            user=collect_user_summary(db, user),
+            user=user_summary,
         ),
     )
 
