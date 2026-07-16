@@ -245,6 +245,7 @@ class User(Base):
         Index("fk_users_organization", "organization_id"),
         Index("ix_users_status_org", "account_status", "organization_id"),
         Index("uk_users_email", "email", unique=True),
+        Index("uk_users_password_reset_token_hash", "password_reset_token_hash", unique=True),
         Index("uk_users_public_id", "public_id", unique=True),
     )
 
@@ -272,6 +273,11 @@ class User(Base):
     deactivated_at: Mapped[Optional[datetime.datetime]] = mapped_column(DATETIME(fsp=3))
     deactivated_by_user_id: Mapped[Optional[int]] = mapped_column(BIGINT(20, unsigned=True))
     deleted_at: Mapped[Optional[datetime.datetime]] = mapped_column(DATETIME(fsp=3))
+    password_reset_token_hash: Mapped[Optional[str]] = mapped_column(CHAR(64))
+    password_reset_token_expires_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DATETIME(fsp=3)
+    )
+    password_changed_at: Mapped[Optional[datetime.datetime]] = mapped_column(DATETIME(fsp=3))
 
     deactivated_by_user: Mapped[Optional["User"]] = relationship(
         "User", remote_side=[user_id], back_populates="deactivated_by_user_reverse"
@@ -416,6 +422,9 @@ class UserSession(Base):
         VARCHAR(30), nullable=False, server_default=text("'WEB'")
     )
     expires_at: Mapped[datetime.datetime] = mapped_column(DATETIME(fsp=3), nullable=False)
+    is_persistent: Mapped[int] = mapped_column(
+        TINYINT(1), nullable=False, server_default=text("0")
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DATETIME(fsp=3), nullable=False, server_default=text("current_timestamp(3)")
     )

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated, Any
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -117,6 +117,24 @@ class Settings(BaseSettings):
         default="roadbogo_refresh_token",
         validation_alias="AUTH_REFRESH_COOKIE_NAME",
     )
+    frontend_base_url: str = Field(
+        default="http://localhost:3000",
+        validation_alias="FRONTEND_BASE_URL",
+    )
+    auth_password_reset_expire_minutes: int = Field(
+        default=30,
+        validation_alias="AUTH_PASSWORD_RESET_EXPIRE_MINUTES",
+    )
+    auth_password_reset_debug_response: bool = Field(
+        default=False,
+        validation_alias="AUTH_PASSWORD_RESET_DEBUG_RESPONSE",
+    )
+    smtp_host: str | None = Field(default=None, validation_alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, validation_alias="SMTP_PORT")
+    smtp_username: str | None = Field(default=None, validation_alias="SMTP_USERNAME")
+    smtp_password: SecretStr | None = Field(default=None, validation_alias="SMTP_PASSWORD")
+    smtp_from_email: str | None = Field(default=None, validation_alias="SMTP_FROM_EMAIL")
+    smtp_use_tls: bool = Field(default=True, validation_alias="SMTP_USE_TLS")
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -151,7 +169,7 @@ class Settings(BaseSettings):
 
     @field_validator("cors_origins", mode="before")
     @classmethod
-    def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
+    def parse_cors_origins(cls, value: str | list[str]) -> list[str]:  # noqa: F811
         origins = value.split(",") if isinstance(value, str) else value
         normalized = [origin.strip() for origin in origins if origin.strip()]
 
@@ -186,6 +204,23 @@ class Settings(BaseSettings):
             raise ValueError("Authentication expiration values must be at least 1.")
 
         return value
+
+    @field_validator("auth_password_reset_expire_minutes", "smtp_port")
+    @classmethod
+    def validate_positive_auth_account_values(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Authentication account values must be at least 1.")
+
+        return value
+
+    @model_validator(mode="after")
+    def validate_password_reset_debug_response(self) -> "Settings":
+        if self.auth_password_reset_debug_response and self.app_env not in {"local", "test"}:
+            raise ValueError(
+                "AUTH_PASSWORD_RESET_DEBUG_RESPONSE is only allowed in local or test."
+            )
+
+        return self
 
 
 @lru_cache

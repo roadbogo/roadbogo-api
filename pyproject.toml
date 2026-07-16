@@ -29,10 +29,6 @@ dev = [
   "ruff>=0.6.0"
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["app*"]
-exclude = ["migrations*", "tests*"]
 
 [tool.ruff]
 line-length = 100

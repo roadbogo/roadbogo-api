@@ -214,6 +214,16 @@ def hash_refresh_token(refresh_token: str) -> str:
     return hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
 
 
+def generate_password_reset_token() -> str:
+    """Generate an opaque password reset token."""
+    return secrets.token_urlsafe(48)
+
+
+def hash_password_reset_token(token: str) -> str:
+    """Return the SHA-256 hex digest for an opaque password reset token."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def verify_refresh_token_hash(
     refresh_token: str,
     expected_hash: str,
