@@ -36,11 +36,37 @@ pytest -q
 
 API documents are available at `http://localhost:8000/docs`.
 
+Phone numbers are encrypted before storage. Generate a dedicated Fernet key and set
+`AUTH_PHONE_ENCRYPTION_KEY` in `.env` (do not reuse the JWT secret):
+
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
 Health check:
 
 ```bash
 curl http://localhost:8000/api/v1/health
 ```
+
+## Authentication API
+
+`GET /api/v1/auth/me` and `PATCH /api/v1/auth/me` both return `data.user` with
+the same fields as the login response: `public_id`, `email`, `user_name`,
+`phone`, `account_status`, `organization`, `roles`, `permissions`, and
+`last_login_at`. `PATCH` accepts only `user_name` and `phone`. A phone write
+requires `AUTH_PHONE_ENCRYPTION_KEY`; configuration failures use the
+`AUTH_PHONE_ENCRYPTION_UNAVAILABLE` error code without exposing key details.
+
+Password reset uses `POST /api/v1/auth/password-reset/request` followed by
+`POST /api/v1/auth/password-reset/confirm`. The request endpoint deliberately
+returns the same public acknowledgement for known and unknown accounts. In
+`APP_ENV=local` or `test`, `AUTH_PASSWORD_RESET_DEBUG_RESPONSE=true` may include
+a same-origin `${FRONTEND_BASE_URL}/reset-password?token=...` URL. Settings
+validation rejects that debug option in every other environment. Production
+delivery therefore requires SMTP configuration. Confirmation can return
+`AUTH_PASSWORD_RESET_TOKEN_INVALID`, `AUTH_PASSWORD_RESET_TOKEN_EXPIRED`,
+`AUTH_ACCOUNT_UNAVAILABLE`, or `USER_PASSWORD_POLICY_VIOLATION`.
 
 ## Database Migration
 

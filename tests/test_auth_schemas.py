@@ -5,6 +5,7 @@ from app.schemas.auth import (
     LoginRequest,
     PasswordResetConfirmRequest,
     RegisterRequest,
+    UpdateMeRequest,
 )
 
 
@@ -48,3 +49,29 @@ def test_password_confirmations_must_match() -> None:
 def test_login_request_rejects_invalid_email() -> None:
     with pytest.raises(ValidationError):
         LoginRequest(email="not-an-email", password="password123")
+
+
+def test_password_policy_lengths_are_consistent() -> None:
+    with pytest.raises(ValidationError):
+        RegisterRequest(
+            email="user@example.com",
+            user_name="홍길동",
+            password="a1" * 33,
+            password_confirmation="a1" * 33,
+        )
+    with pytest.raises(ValidationError):
+        PasswordResetConfirmRequest(
+            token="token",
+            new_password="a1" * 33,
+            new_password_confirmation="a1" * 33,
+        )
+
+
+def test_update_me_restricts_fields_and_normalizes_phone() -> None:
+    payload = UpdateMeRequest(user_name=" 새 이름 ", phone="010-1234-5678")
+    assert payload.user_name == "새 이름"
+    assert payload.phone == "01012345678"
+    with pytest.raises(ValidationError):
+        UpdateMeRequest(email="other@example.com")
+    with pytest.raises(ValidationError):
+        UpdateMeRequest()

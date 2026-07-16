@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
 import re
 from uuid import UUID
+from pydantic import ValidationError
 
 import jwt
 import pytest
+from cryptography.fernet import Fernet
 
 from app.core import security
 from app.core.config import Settings
@@ -21,6 +23,8 @@ from app.core.security import (
     verify_password,
     verify_password_or_dummy,
     verify_refresh_token_hash,
+    encrypt_phone,
+    decrypt_phone,
 )
 
 
@@ -80,6 +84,49 @@ def test_password_hashing_and_verification() -> None:
     assert verify_password("correct-password", "not-a-valid-hash") is False
     assert verify_password_or_dummy("correct-password", None) is False
     assert hash_password("same-password") != hash_password("same-password")
+
+
+def test_phone_encryption_round_trip_without_plaintext(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setattr(
+        security,
+        "get_settings",
+        lambda: Settings(_env_file=None, AUTH_PHONE_ENCRYPTION_KEY=key),
+    )
+    encrypted = encrypt_phone("01012345678")
+    assert b"01012345678" not in encrypted
+    assert decrypt_phone(encrypted) == "01012345678"
+
+
+def test_phone_decryption_rejects_wrong_key_and_corrupt_ciphertext(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_key = Fernet.generate_key().decode("ascii")
+    second_key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setattr(
+        security,
+        "get_settings",
+        lambda: Settings(_env_file=None, AUTH_PHONE_ENCRYPTION_KEY=first_key),
+    )
+    encrypted = encrypt_phone("01012345678")
+    monkeypatch.setattr(
+        security,
+        "get_settings",
+        lambda: Settings(_env_file=None, AUTH_PHONE_ENCRYPTION_KEY=second_key),
+    )
+    with pytest.raises(security.SecurityError, match="could not be decrypted"):
+        decrypt_phone(encrypted)
+    with pytest.raises(security.SecurityError, match="could not be decrypted"):
+        decrypt_phone(b"corrupt-ciphertext")
+
+
+def test_debug_password_reset_response_is_rejected_in_production() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            APP_ENV="production",
+            AUTH_PASSWORD_RESET_DEBUG_RESPONSE=True,
+        )
 
 
 def test_access_token_create_and_decode(monkeypatch: pytest.MonkeyPatch) -> None:

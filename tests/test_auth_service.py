@@ -1,11 +1,18 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography.fernet import Fernet
 
 from app.core.config import Settings
-from app.core.security import hash_password, hash_password_reset_token, hash_refresh_token
+from app.core.security import (
+    PhoneEncryptionConfigurationError,
+    hash_password,
+    hash_password_reset_token,
+    hash_refresh_token,
+    verify_password,
+)
 from app.models.auth import Role, User, UserRole, UserSession
-from app.schemas.auth import LoginRequest, PasswordResetConfirmRequest, RegisterRequest
+from app.schemas.auth import LoginRequest, PasswordResetConfirmRequest, RegisterRequest, UpdateMeRequest
 from app.services import auth as auth_service
 
 
@@ -57,11 +64,30 @@ def test_password_reset_confirm_hashes_password_and_revokes_sessions() -> None:
     )
 
     assert user.password_hash.startswith("$argon2")
+    assert verify_password("old-password", user.password_hash) is False
+    assert verify_password("newPassword123", user.password_hash) is True
     assert user.password_reset_token_hash is None
     assert user.password_reset_token_expires_at is None
     assert user.password_changed_at is not None
     assert db.updated is True
     assert db.committed is True
+
+
+def test_password_reset_rejects_password_without_letter_or_number() -> None:
+    user = active_user()
+    user.password_reset_token_hash = hash_password_reset_token("reset-token")
+    user.password_reset_token_expires_at = auth_service.utc_now_naive() + timedelta(minutes=30)
+    db = FakeDb(user)
+    with pytest.raises(Exception) as exc_info:
+        auth_service.confirm_password_reset(
+            db,
+            PasswordResetConfirmRequest(
+                token="reset-token",
+                new_password="abcdefgh",
+                new_password_confirmation="abcdefgh",
+            ),
+        )
+    assert exc_info.value.code == "USER_PASSWORD_POLICY_VIOLATION"
 
 
 def test_password_reset_delivery_unavailable_is_checked_before_lookup() -> None:
@@ -78,6 +104,103 @@ def test_password_reset_delivery_unavailable_is_checked_before_lookup() -> None:
         assert exc.code == "AUTH_PASSWORD_RESET_DELIVERY_UNAVAILABLE"
     else:
         raise AssertionError("Expected delivery unavailable error.")
+
+
+def test_password_reset_request_is_generic_for_missing_and_existing_user() -> None:
+    config = Settings(
+        _env_file=None,
+        APP_ENV="test",
+        AUTH_PASSWORD_RESET_DEBUG_RESPONSE=True,
+    )
+    missing = auth_service.request_password_reset(
+        FakeDb(None),
+        auth_service.PasswordResetRequest(email="missing@example.com"),
+        config=config,
+    )
+    existing_user = active_user()
+    previous_token_hash = hash_password_reset_token("previous-reset-token")
+    existing_user.password_reset_token_hash = previous_token_hash
+    existing_db = FakeDb(existing_user)
+    existing = auth_service.request_password_reset(
+        existing_db,
+        auth_service.PasswordResetRequest(email=existing_user.email),
+        config=config,
+    )
+    assert missing.accepted is True
+    assert existing.accepted is True
+    assert missing.debug_reset_url is None
+    assert existing.debug_reset_url is not None
+    assert existing_user.password_reset_token_hash is not None
+    assert existing_user.password_reset_token_hash != previous_token_hash
+    assert existing_user.password_reset_token_hash != existing.debug_reset_token
+    assert existing.debug_reset_url.startswith("http://localhost:3000/reset-password?token=")
+    assert existing_db.committed is True
+
+
+@pytest.mark.parametrize(
+    ("status", "deleted"),
+    [("INACTIVE", False), ("ACTIVE", True)],
+)
+def test_password_reset_request_is_generic_for_unavailable_account(
+    status: str,
+    deleted: bool,
+) -> None:
+    user = User(
+        user_id=1,
+        public_id="user-public-id",
+        email="user@example.com",
+        password_hash=hash_password("password123"),
+        user_name="홍길동",
+        account_status=status,
+        deleted_at=auth_service.utc_now_naive() if deleted else None,
+    )
+    config = Settings(
+        _env_file=None,
+        APP_ENV="test",
+        AUTH_PASSWORD_RESET_DEBUG_RESPONSE=True,
+    )
+    data = auth_service.request_password_reset(
+        FakeDb(user),
+        auth_service.PasswordResetRequest(email=user.email),
+        config=config,
+    )
+
+    assert data.accepted is True
+    assert data.debug_reset_token is None
+    assert data.debug_reset_url is None
+    assert user.password_reset_token_hash is None
+
+
+@pytest.mark.parametrize(
+    ("user", "expected_code"),
+    [
+        (None, "AUTH_PASSWORD_RESET_TOKEN_INVALID"),
+        (
+            User(
+                user_id=1,
+                public_id="user-public-id",
+                email="user@example.com",
+                password_hash="hash",
+                user_name="홍길동",
+                account_status="ACTIVE",
+                password_reset_token_hash=hash_password_reset_token("reset-token"),
+                password_reset_token_expires_at=auth_service.utc_now_naive() - timedelta(seconds=1),
+            ),
+            "AUTH_PASSWORD_RESET_TOKEN_EXPIRED",
+        ),
+    ],
+)
+def test_password_reset_rejects_invalid_used_or_expired_token(user, expected_code) -> None:
+    with pytest.raises(Exception) as exc_info:
+        auth_service.confirm_password_reset(
+            FakeDb(user),
+            PasswordResetConfirmRequest(
+                token="reset-token",
+                new_password="newPassword123",
+                new_password_confirmation="newPassword123",
+            ),
+        )
+    assert exc_info.value.code == expected_code
 
 
 def test_refresh_cookie_options() -> None:
@@ -190,6 +313,82 @@ def active_user(*, deleted: bool = False, status: str = "ACTIVE") -> User:
         account_status=status,
         deleted_at=auth_service.utc_now_naive() if deleted else None,
     )
+
+
+def test_update_me_encrypts_phone_and_preserves_restricted_fields(monkeypatch) -> None:
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setattr(
+        auth_service,
+        "encrypt_phone",
+        lambda value: b"encrypted:" + value.encode(),
+    )
+    monkeypatch.setattr(auth_service, "collect_user_summary", lambda db, user: auth_service.UserSummary(
+        public_id=user.public_id,
+        email=user.email,
+        user_name=user.user_name,
+        account_status=user.account_status,
+        roles=["GENERAL_USER"],
+        permissions=[],
+        phone="01012345678",
+    ))
+    user = active_user()
+    db = AuthFakeDb(email_user=user)
+    summary = auth_service.update_me(
+        db,
+        user,
+        UpdateMeRequest(user_name="새 이름", phone="010-1234-5678"),
+    )
+    assert key
+    assert user.user_name == "새 이름"
+    assert user.email == "user@example.com"
+    assert user.phone_encrypted == b"encrypted:01012345678"
+    assert summary.phone == "01012345678"
+    assert db.committed is True
+
+
+def test_update_me_name_only_does_not_require_phone_encryption(monkeypatch) -> None:
+    user = active_user()
+    original_phone = b"existing-ciphertext"
+    user.phone_encrypted = original_phone
+    db = AuthFakeDb(email_user=user)
+    monkeypatch.setattr(auth_service, "encrypt_phone", lambda value: pytest.fail("unexpected"))
+    monkeypatch.setattr(
+        auth_service,
+        "collect_user_summary",
+        lambda db, user: auth_service.UserSummary(
+            public_id=user.public_id,
+            email=user.email,
+            user_name=user.user_name,
+            account_status=user.account_status,
+            roles=["GENERAL_USER"],
+            permissions=[],
+        ),
+    )
+
+    auth_service.update_me(db, user, UpdateMeRequest(user_name="새 이름"))
+
+    assert user.user_name == "새 이름"
+    assert user.phone_encrypted == original_phone
+    assert db.committed is True
+
+
+def test_update_me_phone_change_maps_missing_key_to_safe_error(monkeypatch) -> None:
+    user = active_user()
+    db = AuthFakeDb(email_user=user)
+    monkeypatch.setattr(
+        auth_service,
+        "encrypt_phone",
+        lambda value: (_ for _ in ()).throw(
+            PhoneEncryptionConfigurationError("AUTH_PHONE_ENCRYPTION_KEY secret detail")
+        ),
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        auth_service.update_me(db, user, UpdateMeRequest(phone="010-1234-5678"))
+
+    assert exc_info.value.code == "AUTH_PHONE_ENCRYPTION_UNAVAILABLE"
+    assert "key" not in exc_info.value.message.lower()
+    assert user.phone_encrypted is None
 
 
 def general_role() -> Role:

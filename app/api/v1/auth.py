@@ -18,6 +18,7 @@ from app.schemas.auth import (
     PasswordResetRequestData,
     RegisterData,
     RegisterRequest,
+    UpdateMeRequest,
 )
 from app.schemas.common import SuccessResponse
 from app.services import auth as auth_service
@@ -129,6 +130,21 @@ def me(
 ) -> dict[str, Any]:
     return success_response(
         data={"user": current_user.summary.model_dump()},
+        trace_id=request.state.trace_id,
+    )
+
+
+@router.patch("/me", response_model=SuccessResponse[RegisterData])
+def update_me(
+    request: Request,
+    payload: UpdateMeRequest,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    user = auth_service.update_me(db, current_user.user, payload)
+    return success_response(
+        data={"user": user.model_dump()},
+        message="회원정보가 수정되었습니다.",
         trace_id=request.state.trace_id,
     )
 

@@ -117,6 +117,10 @@ class Settings(BaseSettings):
         default="roadbogo_refresh_token",
         validation_alias="AUTH_REFRESH_COOKIE_NAME",
     )
+    auth_phone_encryption_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="AUTH_PHONE_ENCRYPTION_KEY",
+    )
     frontend_base_url: str = Field(
         default="http://localhost:3000",
         validation_alias="FRONTEND_BASE_URL",
@@ -166,17 +170,6 @@ class Settings(BaseSettings):
                 "CORS_ORIGINS cannot include '*' "
                 "when credentials are enabled."
             )
-
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, value: str | list[str]) -> list[str]:  # noqa: F811
-        origins = value.split(",") if isinstance(value, str) else value
-        normalized = [origin.strip() for origin in origins if origin.strip()]
-
-        if not normalized or "*" in normalized:
-            raise ValueError("CORS_ORIGINS must contain explicit origins")
-
-        return normalized
 
     @field_validator("auth_jwt_secret_key")
     @classmethod

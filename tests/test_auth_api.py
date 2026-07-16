@@ -171,7 +171,69 @@ def test_me_uses_current_user_dependency() -> None:
     response = client.get("/api/v1/auth/me", headers={"Authorization": "Bearer access-token"})
 
     assert response.status_code == 200
+    user = response.json()["data"]["user"]
+    assert user["email"] == "user@example.com"
+    assert set(user) == {
+        "public_id", "email", "user_name", "phone", "account_status",
+        "organization", "roles", "permissions", "last_login_at",
+    }
+
+
+def test_patch_me_uses_current_user_and_restricts_fields(monkeypatch) -> None:
+    current = CurrentUser(user=DummyUser(), session=DummySession(), summary=user_summary())
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: current
+    monkeypatch.setattr(auth_api.auth_service, "update_me", lambda db, user, payload: user_summary())
+    client = TestClient(app)
+    response = client.patch(
+        "/api/v1/auth/me",
+        headers={"Authorization": "Bearer access-token"},
+        json={"user_name": "새 이름", "phone": "010-1234-5678"},
+    )
+    assert response.status_code == 200
     assert response.json()["data"]["user"]["email"] == "user@example.com"
+    rejected = client.patch(
+        "/api/v1/auth/me",
+        headers={"Authorization": "Bearer access-token"},
+        json={"email": "other@example.com"},
+    )
+    assert rejected.status_code == 422
+
+
+def test_patch_me_returns_safe_phone_encryption_error(monkeypatch) -> None:
+    current = CurrentUser(user=DummyUser(), session=DummySession(), summary=user_summary())
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: current
+
+    def unavailable(db, user, payload):
+        raise AppException(
+            status_code=503,
+            code="AUTH_PHONE_ENCRYPTION_UNAVAILABLE",
+            message="Phone number storage is temporarily unavailable.",
+        )
+
+    monkeypatch.setattr(auth_api.auth_service, "update_me", unavailable)
+    response = TestClient(app).patch(
+        "/api/v1/auth/me",
+        headers={"Authorization": "Bearer access-token"},
+        json={"phone": "010-1234-5678"},
+    )
+    body = response.json()
+    assert response.status_code == 503
+    assert body["error"]["code"] == "AUTH_PHONE_ENCRYPTION_UNAVAILABLE"
+    assert "key" not in response.text.lower()
+
+
+def test_password_reset_confirm_contract(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(auth_api.auth_service, "confirm_password_reset", lambda db, payload: calls.append(payload.token))
+    client = client_with_dummy_db()
+    response = client.post(
+        "/api/v1/auth/password-reset/confirm",
+        json={"token": "reset-token", "new_password": "newPassword123", "new_password_confirmation": "newPassword123"},
+    )
+    assert response.status_code == 200
+    assert calls == ["reset-token"]
 
 
 def test_password_reset_request_debug_contract(monkeypatch) -> None:
@@ -194,3 +256,20 @@ def test_password_reset_request_debug_contract(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["data"]["accepted"] is True
     assert response.json()["data"]["debug_reset_token"] == "debug-token"
+
+
+def test_password_reset_request_uses_same_public_message(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auth_api.auth_service,
+        "request_password_reset",
+        lambda db, payload: auth_api.PasswordResetRequestData(accepted=True),
+    )
+    client = client_with_dummy_db()
+    first = client.post("/api/v1/auth/password-reset/request", json={"email": "known@example.com"})
+    second = client.post("/api/v1/auth/password-reset/request", json={"email": "missing@example.com"})
+    assert first.status_code == second.status_code == 200
+    assert first.json()["message"] == second.json()["message"]
+    assert first.json()["data"] == second.json()["data"]
+    assert first.json()["data"]["accepted"] is True
+    assert first.json()["data"]["debug_reset_token"] is None
+    assert first.json()["data"]["debug_reset_url"] is None

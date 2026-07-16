@@ -1,8 +1,16 @@
 import re
+from datetime import datetime
 
 from pydantic import Field, field_validator, model_validator
 
 from app.schemas.base import RequestModel
+from app.core.password_policy import PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH
+
+
+class OrganizationSummary(RequestModel):
+    public_id: str
+    organization_name: str
+    organization_type: str
 
 
 class UserSummary(RequestModel):
@@ -12,6 +20,9 @@ class UserSummary(RequestModel):
     account_status: str
     roles: list[str]
     permissions: list[str]
+    phone: str | None = None
+    organization: OrganizationSummary | None = None
+    last_login_at: datetime | None = None
 
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -27,8 +38,8 @@ def normalize_and_validate_email(value: str) -> str:
 class RegisterRequest(RequestModel):
     email: str = Field(max_length=254)
     user_name: str = Field(min_length=2, max_length=100)
-    password: str = Field(min_length=8, max_length=128)
-    password_confirmation: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+    password_confirmation: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
 
     @field_validator("email", mode="before")
     @classmethod
@@ -44,6 +55,27 @@ class RegisterRequest(RequestModel):
 
 class RegisterData(RequestModel):
     user: UserSummary
+
+
+class UpdateMeRequest(RequestModel):
+    user_name: str | None = Field(default=None, min_length=2, max_length=100)
+    phone: str | None = Field(default=None, max_length=30)
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = re.sub(r"[^0-9+]", "", value)
+        if not 8 <= len(normalized.lstrip("+")) <= 15:
+            raise ValueError("Invalid phone number.")
+        return normalized
+
+    @model_validator(mode="after")
+    def require_update(self) -> "UpdateMeRequest":
+        if not self.model_fields_set:
+            raise ValueError("At least one field is required.")
+        return self
 
 
 class LoginRequest(RequestModel):
@@ -81,8 +113,8 @@ class PasswordResetRequestData(RequestModel):
 
 class PasswordResetConfirmRequest(RequestModel):
     token: str = Field(min_length=1, max_length=512)
-    new_password: str = Field(min_length=8, max_length=128)
-    new_password_confirmation: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+    new_password_confirmation: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
 
     @model_validator(mode="after")
     def validate_password_confirmation(self) -> "PasswordResetConfirmRequest":

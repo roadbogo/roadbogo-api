@@ -9,8 +9,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, settings
 from app.core.exceptions import AppException
+from app.core.password_policy import enforce_password_policy
 from app.core.security import (
+    PhoneEncryptionConfigurationError,
     create_access_token,
+    decrypt_phone,
+    encrypt_phone,
     generate_password_reset_token,
     generate_refresh_token,
     get_refresh_token_expires_at,
@@ -23,10 +27,12 @@ from app.models.auth import Permission, Role, RolePermission, User, UserRole, Us
 from app.schemas.auth import (
     AuthTokenData,
     LoginRequest,
+    OrganizationSummary,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
     PasswordResetRequestData,
     RegisterRequest,
+    UpdateMeRequest,
     UserSummary,
 )
 from app.services import mail
@@ -124,6 +130,15 @@ def collect_user_summary(db: Session, user: User) -> UserSummary:
     permissions = sorted(
         {permission_code for _role_code, permission_code in rows if permission_code}
     )
+    organization = (
+        OrganizationSummary(
+            public_id=user.organization.public_id,
+            organization_name=user.organization.organization_name,
+            organization_type=user.organization.organization_type,
+        )
+        if user.organization is not None
+        else None
+    )
     return UserSummary(
         public_id=user.public_id,
         email=user.email,
@@ -131,10 +146,14 @@ def collect_user_summary(db: Session, user: User) -> UserSummary:
         account_status=user.account_status,
         roles=roles,
         permissions=permissions,
+        phone=decrypt_phone(user.phone_encrypted),
+        organization=organization,
+        last_login_at=user.last_login_at,
     )
 
 
 def register_user(db: Session, request: RegisterRequest) -> UserSummary:
+    enforce_password_policy(request.password)
     existing = db.execute(_user_by_email_statement(request.email)).scalar_one_or_none()
     if existing is not None:
         raise auth_error(409, "AUTH_EMAIL_ALREADY_EXISTS", "Email already exists.")
@@ -171,6 +190,28 @@ def register_user(db: Session, request: RegisterRequest) -> UserSummary:
         raise
 
     return user_summary
+
+
+def update_me(db: Session, user: User, request: UpdateMeRequest) -> UserSummary:
+    if "user_name" in request.model_fields_set and request.user_name is not None:
+        user.user_name = request.user_name
+    if "phone" in request.model_fields_set:
+        try:
+            user.phone_encrypted = encrypt_phone(request.phone) if request.phone else None
+        except PhoneEncryptionConfigurationError as exc:
+            raise auth_error(
+                503,
+                "AUTH_PHONE_ENCRYPTION_UNAVAILABLE",
+                "Phone number storage is temporarily unavailable.",
+            ) from exc
+    try:
+        db.flush()
+        summary = collect_user_summary(db, user)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return summary
 
 
 def issue_auth_tokens(
@@ -327,6 +368,7 @@ def request_password_reset(
 
 
 def confirm_password_reset(db: Session, request: PasswordResetConfirmRequest) -> None:
+    enforce_password_policy(request.new_password)
     token_hash = hash_password_reset_token(request.token)
     user = db.execute(
         select(User).where(User.password_reset_token_hash == token_hash).with_for_update()

@@ -7,6 +7,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import jwt
+from cryptography.fernet import Fernet, InvalidToken
 from pwdlib import PasswordHash
 
 from app.core.config import get_settings
@@ -39,6 +40,10 @@ class AccessTokenExpiredError(SecurityTokenError):
 
 
 class InvalidAccessTokenError(SecurityTokenError):
+    pass
+
+
+class PhoneEncryptionConfigurationError(SecurityConfigurationError):
     pass
 
 
@@ -126,6 +131,29 @@ def verify_password_or_dummy(
         return False
 
     return verify_password(plain_password, password_hash)
+
+
+def _phone_cipher() -> Fernet:
+    key = get_settings().auth_phone_encryption_key
+    if key is None:
+        raise PhoneEncryptionConfigurationError("Phone encryption key is not configured.")
+    try:
+        return Fernet(key.get_secret_value().encode("ascii"))
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise PhoneEncryptionConfigurationError("Phone encryption key is invalid.") from exc
+
+
+def encrypt_phone(phone: str) -> bytes:
+    return _phone_cipher().encrypt(phone.encode("utf-8"))
+
+
+def decrypt_phone(value: bytes | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return _phone_cipher().decrypt(value).decode("utf-8")
+    except (InvalidToken, UnicodeDecodeError) as exc:
+        raise SecurityError("Stored phone data could not be decrypted.") from exc
 
 
 def create_access_token(
