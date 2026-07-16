@@ -1,13 +1,11 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
-from sqlalchemy.engine import Connection
-from sqlalchemy.engine import create_engine
+from sqlalchemy.engine import Connection, create_engine
+from sqlalchemy import engine_from_config, pool
 
 import app.models  # noqa: F401
 from app.core.database import Base, database_url
-
 
 config = context.config
 
@@ -46,6 +44,7 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        compare_server_default=True,
     )
 
     with context.begin_transaction():
@@ -61,9 +60,15 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        do_run_migrations(connection)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            compare_server_default=True,
+        )
 
-    connectable.dispose()
+        with context.begin_transaction():
+            context.run_migrations()
 
 
 if context.is_offline_mode():

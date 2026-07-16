@@ -120,6 +120,17 @@ class Settings(BaseSettings):
                 "when credentials are enabled."
             )
 
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
+        origins = value.split(",") if isinstance(value, str) else value
+        normalized = [origin.strip() for origin in origins if origin.strip()]
+
+        if not normalized or "*" in normalized:
+            raise ValueError("CORS_ORIGINS must contain explicit origins")
+
+        return normalized
+
 
 @lru_cache
 def get_settings() -> Settings:

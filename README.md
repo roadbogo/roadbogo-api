@@ -6,6 +6,9 @@ Roadbogo service API server.
 
 - Python 3.11+
 - FastAPI
+- MariaDB 10.11
+- SQLAlchemy 2.x
+- Alembic
 - Uvicorn
 - Pydantic Settings
 
@@ -38,3 +41,22 @@ Health check:
 ```bash
 curl http://localhost:8000/api/v1/health
 ```
+
+## Database Migration
+
+Apply the verified MVP schema, reference seed data, and views:
+
+```powershell
+python -m alembic upgrade head
+```
+
+Compare a migrated test database with the SQL reference database:
+
+```powershell
+python scripts/compare_mvp_databases.py `
+  --reference roadbogo_test `
+  --migration roadbogo_orm_test
+```
+
+The migration-managed database includes Alembic's `alembic_version` table in
+addition to the 44 MVP tables. The comparison script excludes only that table.
