@@ -160,13 +160,17 @@ def register_user(db: Session, request: RegisterRequest) -> UserSummary:
     try:
         db.flush()
         db.add(UserRole(user_id=user.user_id, role_id=role.role_id))
+        db.flush()
+        user_summary = collect_user_summary(db, user)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise auth_error(409, "AUTH_EMAIL_ALREADY_EXISTS", "Email already exists.") from exc
+    except Exception:
+        db.rollback()
+        raise
 
-    db.refresh(user)
-    return collect_user_summary(db, user)
+    return user_summary
 
 
 def issue_auth_tokens(
@@ -209,8 +213,6 @@ def issue_auth_tokens(
         access_token = create_access_token(user.public_id, session.public_id)
         user_summary = collect_user_summary(db, user)
         db.commit()
-        db.refresh(session)
-        db.refresh(user)
     except Exception:
         db.rollback()
         if previous_refresh_token_hash is not None:

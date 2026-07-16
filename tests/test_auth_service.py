@@ -127,22 +127,30 @@ class AuthFakeDb:
     def execute(self, statement):
         statement_text = str(statement)
         if statement_text.startswith("UPDATE"):
+            self.order.append("execute:update")
             return QueryResult()
         if "FROM users" in statement_text and "users.email" in statement_text:
+            self.order.append("execute:user_by_email")
             return QueryResult(self.email_user)
         if "FROM roles" in statement_text:
+            self.order.append("execute:role")
             return QueryResult(self.role)
         if "FROM user_sessions" in statement_text:
+            self.order.append("execute:session")
             return QueryResult(self.session)
         if "FROM user_roles" in statement_text:
+            self.order.append("summary")
             return QueryResult(rows=[("GENERAL_USER", None)])
+        self.order.append("execute:other")
         return QueryResult()
 
     def add(self, value) -> None:
         self.added.append(value)
         if isinstance(value, UserRole):
+            self.order.append("add:UserRole")
             self.user_role = value
         if isinstance(value, UserSession):
+            self.order.append("add:UserSession")
             self.user_session = value
 
     def flush(self) -> None:
@@ -456,4 +464,110 @@ def test_issue_auth_tokens_order_is_flush_token_then_commit(monkeypatch) -> None
 
     auth_service.issue_auth_tokens(db, user)
 
-    assert db.order[:3] == ["flush", "token", "commit"]
+    assert db.order[:4] == ["add:UserSession", "flush", "token", "summary"]
+    assert db.order[-1] == "commit"
+
+
+def test_issue_auth_tokens_has_no_db_operation_after_commit(monkeypatch) -> None:
+    user = active_user()
+    db = AuthFakeDb()
+
+    def create_token(user_public_id, session_public_id):
+        db.order.append("token")
+        return "access"
+
+    monkeypatch.setattr(auth_service, "create_access_token", create_token)
+
+    auth_service.issue_auth_tokens(db, user)
+
+    assert db.order[-1] == "commit"
+    assert not any(item.startswith("refresh:") for item in db.order)
+    assert db.order.count("flush") == 1
+    assert db.order.count("summary") == 1
+
+
+def test_issue_auth_tokens_commit_failure_rolls_back(monkeypatch) -> None:
+    user = active_user()
+    old_expires_at = auth_service.utc_now_naive() + timedelta(days=1)
+    session = UserSession(
+        user_session_id=10,
+        public_id="session-public-id",
+        user_id=user.user_id,
+        refresh_token_hash=hash_refresh_token("old-refresh-token"),
+        client_type="WEB",
+        expires_at=old_expires_at,
+        is_persistent=1,
+    )
+    db = AuthFakeDb(fail_commit=RuntimeError("commit failed"))
+    monkeypatch.setattr(auth_service, "generate_refresh_token", lambda: "new-refresh-token")
+    monkeypatch.setattr(auth_service, "create_access_token", lambda user_id, session_id: "access")
+
+    with pytest.raises(RuntimeError):
+        auth_service.issue_auth_tokens(db, user, session=session)
+
+    assert db.committed is False
+    assert db.rolled_back is True
+    assert db.order[-2:] == ["commit", "rollback"]
+    assert session.refresh_token_hash == hash_refresh_token("old-refresh-token")
+    assert session.expires_at == old_expires_at
+
+
+def test_register_user_builds_summary_before_commit() -> None:
+    db = AuthFakeDb(role=general_role())
+
+    auth_service.register_user(
+        db,
+        RegisterRequest(
+            email="new@example.com",
+            user_name="홍길동",
+            password="password123",
+            password_confirmation="password123",
+        ),
+    )
+
+    interesting_order = [
+        item for item in db.order if item in {"flush", "add:UserRole", "summary", "commit"}
+    ]
+    assert interesting_order == ["flush", "add:UserRole", "flush", "summary", "commit"]
+    assert db.order[-1] == "commit"
+
+
+def test_register_user_rolls_back_when_summary_creation_fails(monkeypatch) -> None:
+    db = AuthFakeDb(role=general_role())
+
+    def raise_summary_error(db, user):
+        raise RuntimeError("summary failed")
+
+    monkeypatch.setattr(auth_service, "collect_user_summary", raise_summary_error)
+
+    with pytest.raises(RuntimeError):
+        auth_service.register_user(
+            db,
+            RegisterRequest(
+                email="new@example.com",
+                user_name="홍길동",
+                password="password123",
+                password_confirmation="password123",
+            ),
+        )
+
+    assert db.committed is False
+    assert db.rolled_back is True
+    assert db.order[-1] == "rollback"
+
+
+def test_register_user_does_not_refresh_after_commit() -> None:
+    db = AuthFakeDb(role=general_role())
+
+    auth_service.register_user(
+        db,
+        RegisterRequest(
+            email="new@example.com",
+            user_name="홍길동",
+            password="password123",
+            password_confirmation="password123",
+        ),
+    )
+
+    assert db.order[-1] == "commit"
+    assert not any(item.startswith("refresh:") for item in db.order)
