@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated, Any
 
-from pydantic import Field, field_validator, AliasChoices
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -89,6 +89,35 @@ class Settings(BaseSettings):
         validation_alias="MINIO_SECURE",
     )
 
+    auth_jwt_secret_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="AUTH_JWT_SECRET_KEY",
+    )
+    auth_jwt_algorithm: str = Field(
+        default="HS256",
+        validation_alias="AUTH_JWT_ALGORITHM",
+    )
+    auth_jwt_issuer: str = Field(
+        default="roadbogo-api",
+        validation_alias="AUTH_JWT_ISSUER",
+    )
+    auth_jwt_audience: str = Field(
+        default="roadbogo-web",
+        validation_alias="AUTH_JWT_AUDIENCE",
+    )
+    auth_access_token_expire_minutes: int = Field(
+        default=30,
+        validation_alias="AUTH_ACCESS_TOKEN_EXPIRE_MINUTES",
+    )
+    auth_refresh_token_expire_days: int = Field(
+        default=7,
+        validation_alias="AUTH_REFRESH_TOKEN_EXPIRE_DAYS",
+    )
+    auth_refresh_cookie_name: str = Field(
+        default="roadbogo_refresh_token",
+        validation_alias="AUTH_REFRESH_COOKIE_NAME",
+    )
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: Any) -> list[str] | Any:
@@ -130,6 +159,33 @@ class Settings(BaseSettings):
             raise ValueError("CORS_ORIGINS must contain explicit origins")
 
         return normalized
+
+    @field_validator("auth_jwt_secret_key")
+    @classmethod
+    def validate_auth_jwt_secret_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return value
+
+        if not value.get_secret_value().strip():
+            raise ValueError("AUTH_JWT_SECRET_KEY cannot be blank.")
+
+        return value
+
+    @field_validator("auth_jwt_algorithm")
+    @classmethod
+    def validate_auth_jwt_algorithm(cls, value: str) -> str:
+        if value != "HS256":
+            raise ValueError("AUTH_JWT_ALGORITHM must be HS256.")
+
+        return value
+
+    @field_validator("auth_access_token_expire_minutes", "auth_refresh_token_expire_days")
+    @classmethod
+    def validate_positive_expiration(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Authentication expiration values must be at least 1.")
+
+        return value
 
 
 @lru_cache
