@@ -1,11 +1,12 @@
 from datetime import UTC, datetime, timedelta
 
+from cryptography.fernet import Fernet
 import pytest
 
 from app.core.config import Settings
 from app.core.security import hash_password, hash_password_reset_token, hash_refresh_token
-from app.models.auth import Role, User, UserRole, UserSession
-from app.schemas.auth import LoginRequest, PasswordResetConfirmRequest, RegisterRequest
+from app.models.auth import Organization, Role, User, UserRole, UserSession
+from app.schemas.auth import LoginRequest, PasswordResetConfirmRequest, RegisterRequest, UpdateMeRequest
 from app.services import auth as auth_service
 
 
@@ -160,6 +161,7 @@ class AuthFakeDb:
         for value in self.added:
             if isinstance(value, User) and value.user_id is None:
                 value.user_id = 100
+                value.updated_at = datetime(2026, 7, 17, 5, 10, 0)
             if isinstance(value, UserSession) and value.user_session_id is None:
                 value.user_session_id = 200
 
@@ -173,8 +175,10 @@ class AuthFakeDb:
         self.order.append("rollback")
         self.rolled_back = True
 
-    def refresh(self, value) -> None:
+    def refresh(self, value, attribute_names=None) -> None:
         self.order.append(f"refresh:{type(value).__name__}")
+        if attribute_names == ["updated_at"]:
+            value.updated_at = datetime(2026, 7, 17, 5, 10, 1)
 
     def get(self, model, value):
         return self.get_user
@@ -188,6 +192,7 @@ def active_user(*, deleted: bool = False, status: str = "ACTIVE") -> User:
         password_hash=hash_password("password123"),
         user_name="홍길동",
         account_status=status,
+        updated_at=datetime(2026, 7, 17, 5, 10, 0),
         deleted_at=auth_service.utc_now_naive() if deleted else None,
     )
 
@@ -220,6 +225,25 @@ def test_register_user_assigns_general_user_and_hashes_password() -> None:
     assert user.password_hash != "password123"
     assert summary.roles == ["GENERAL_USER"]
     assert not hasattr(summary, "user_id")
+
+
+def test_register_user_uses_common_password_policy() -> None:
+    db = AuthFakeDb(role=general_role())
+
+    with pytest.raises(Exception) as exc_info:
+        auth_service.register_user(
+            db,
+            RegisterRequest(
+                email="new@example.com",
+                user_name="Hong Gil Dong",
+                password="password",
+                password_confirmation="password",
+            ),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "USER_PASSWORD_POLICY_VIOLATION"
+    assert exc_info.value.details == {"rules": ["number_required"]}
 
 
 def test_register_user_duplicate_email_raises_409() -> None:
@@ -317,8 +341,34 @@ def test_login_creates_session_with_hashed_refresh_token(monkeypatch) -> None:
     assert db.committed is True
 
 
+def test_login_updates_last_login_and_user_updated_at_before_summary(monkeypatch) -> None:
+    monkeypatch.setattr(auth_service, "verify_password_or_dummy", lambda password, hash_: True)
+    monkeypatch.setattr(auth_service, "generate_refresh_token", lambda: "raw-refresh-token")
+    monkeypatch.setattr(auth_service, "create_access_token", lambda user_id, session_id: "access")
+    user = active_user()
+    previous_last_login_at = user.last_login_at
+    previous_updated_at = user.updated_at
+    db = AuthFakeDb(email_user=user)
+
+    result = auth_service.login_user(
+        db,
+        login_request(),
+        ip_address="127.0.0.1",
+        user_agent="test-agent",
+    )
+
+    assert user.last_login_at is not None
+    assert user.last_login_at != previous_last_login_at
+    assert result.data.user.updated_at != previous_updated_at
+    assert db.order[-1] == "commit"
+    assert "refresh:User" in db.order
+
+
 def test_refresh_rotates_hash_and_preserves_persistence(monkeypatch) -> None:
     user = active_user()
+    user.last_login_at = datetime(2026, 7, 17, 1, 30, 20, 123000)
+    original_last_login_at = user.last_login_at
+    original_updated_at = user.updated_at
     session = UserSession(
         user_session_id=10,
         public_id="session-public-id",
@@ -337,6 +387,11 @@ def test_refresh_rotates_hash_and_preserves_persistence(monkeypatch) -> None:
     assert result.raw_refresh_token == "new-refresh-token"
     assert session.refresh_token_hash == hash_refresh_token("new-refresh-token")
     assert session.is_persistent == 1
+    assert user.last_login_at == original_last_login_at
+    assert user.updated_at == original_updated_at
+    assert result.data.user.last_login_at == original_last_login_at
+    assert result.data.user.updated_at == original_updated_at
+    assert "refresh:User" not in db.order
     assert db.committed is True
 
 
@@ -571,3 +626,170 @@ def test_register_user_does_not_refresh_after_commit() -> None:
 
     assert db.order[-1] == "commit"
     assert not any(item.startswith("refresh:") for item in db.order)
+
+
+def test_collect_user_summary_deduplicates_and_serializes_profile(monkeypatch) -> None:
+    key = Fernet.generate_key().decode("utf-8")
+    config = Settings(_env_file=None, AUTH_PHONE_ENCRYPTION_KEY=key)
+    user = active_user()
+    user.phone_encrypted = auth_service.encrypt_phone("+821012345678", config)
+    user.last_login_at = datetime(2026, 7, 17, 1, 30, 20, 123000)
+    user.organization = Organization(
+        organization_id=3,
+        public_id="organization-public-id",
+        organization_code="CENTER",
+        organization_name="Control Center",
+        organization_type="CONTROL_CENTER",
+    )
+    db = AuthFakeDb()
+    db.execute = lambda statement: QueryResult(
+        rows=[
+            ("USER", "INCIDENT.READ"),
+            ("USER", "INCIDENT.READ"),
+            ("ADMIN", "USER.WRITE"),
+        ]
+    )
+    original_decrypt = auth_service.decrypt_phone
+    monkeypatch.setattr(auth_service, "decrypt_phone", lambda value: original_decrypt(value, config))
+
+    summary = auth_service.collect_user_summary(db, user)
+
+    assert summary.phone == "+821012345678"
+    assert summary.roles == ["ADMIN", "USER"]
+    assert summary.permissions == ["INCIDENT.READ", "USER.WRITE"]
+    assert summary.organization is not None
+    assert summary.organization.public_id == "organization-public-id"
+    assert summary.model_dump()["last_login_at"] == "2026-07-17T01:30:20.123Z"
+    assert summary.model_dump()["updated_at"] == "2026-07-17T05:10:00.000Z"
+    dumped = summary.model_dump()
+    assert "user_id" not in dumped
+    assert "phone_encrypted" not in dumped
+    assert "organization_id" not in dumped
+
+
+def test_collect_user_summary_allows_missing_phone_key_when_phone_is_empty() -> None:
+    user = active_user()
+    user.phone_encrypted = None
+
+    summary = auth_service.collect_user_summary(AuthFakeDb(), user)
+
+    assert summary.phone is None
+
+
+def test_decrypt_existing_phone_failure_is_safe() -> None:
+    user = active_user()
+    user.phone_encrypted = b"not-fernet"
+
+    with pytest.raises(Exception) as exc_info:
+        auth_service.collect_user_summary(AuthFakeDb(), user)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.code == "AUTH_PHONE_ENCRYPTION_UNAVAILABLE"
+    assert "not-fernet" not in exc_info.value.message
+
+
+def test_update_current_user_profile_encrypts_phone_and_commits_before_return(
+    monkeypatch,
+) -> None:
+    key = Fernet.generate_key().decode("utf-8")
+    config = Settings(_env_file=None, AUTH_PHONE_ENCRYPTION_KEY=key)
+    user = active_user()
+    user.last_login_at = datetime(2026, 7, 17, 1, 30, 20, 123000)
+    original_last_login_at = user.last_login_at
+    original_updated_at = user.updated_at
+    db = AuthFakeDb()
+    original_encrypt = auth_service.encrypt_phone
+    original_decrypt = auth_service.decrypt_phone
+    monkeypatch.setattr(auth_service, "encrypt_phone", lambda value: original_encrypt(value, config))
+    monkeypatch.setattr(auth_service, "decrypt_phone", lambda value: original_decrypt(value, config))
+
+    summary = auth_service.update_current_user_profile(
+        db,
+        user,
+        UpdateMeRequest(user_name="Updated User", phone="010-1234-5678"),
+    )
+
+    assert user.user_name == "Updated User"
+    assert user.phone_encrypted is not None
+    assert b"01012345678" not in user.phone_encrypted
+    assert summary.user_name == "Updated User"
+    assert summary.last_login_at == original_last_login_at
+    assert summary.updated_at != original_updated_at
+    assert db.order[-1] == "commit"
+    assert db.order.count("flush") == 1
+    assert db.order[-4:] == ["flush", "refresh:User", "summary", "commit"]
+
+
+def test_update_current_user_profile_allows_phone_delete_without_key() -> None:
+    user = active_user()
+    user.phone_encrypted = b"old"
+    original_updated_at = user.updated_at
+    db = AuthFakeDb()
+
+    summary = auth_service.update_current_user_profile(
+        db,
+        user,
+        UpdateMeRequest(phone=None),
+    )
+
+    assert user.phone_encrypted is None
+    assert summary.phone is None
+    assert summary.updated_at != original_updated_at
+
+
+def test_update_current_user_profile_requires_key_for_phone_write() -> None:
+    user = active_user()
+
+    with pytest.raises(Exception) as exc_info:
+        auth_service.update_current_user_profile(
+            AuthFakeDb(),
+            user,
+            UpdateMeRequest(phone="010-1234-5678"),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.code == "AUTH_PHONE_ENCRYPTION_UNAVAILABLE"
+
+
+def test_update_current_user_profile_rejects_invalid_phone_and_rolls_back() -> None:
+    user = active_user()
+    db = AuthFakeDb()
+
+    with pytest.raises(Exception) as exc_info:
+        auth_service.update_current_user_profile(
+            db,
+            user,
+            UpdateMeRequest(phone="12"),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert db.rolled_back is True
+
+
+def test_password_reset_confirm_uses_common_password_policy() -> None:
+    user = User(
+        user_id=1,
+        public_id="user-public-id",
+        email="user@example.com",
+        password_hash=hash_password("old-password"),
+        user_name="Hong Gil Dong",
+        account_status="ACTIVE",
+        password_reset_token_hash=hash_password_reset_token("reset-token"),
+        password_reset_token_expires_at=datetime.now(UTC).replace(tzinfo=None)
+        + timedelta(minutes=30),
+    )
+    db = FakeDb(user)
+
+    with pytest.raises(Exception) as exc_info:
+        auth_service.confirm_password_reset(
+            db,
+            PasswordResetConfirmRequest(
+                token="reset-token",
+                new_password="12345678",
+                new_password_confirmation="12345678",
+            ),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == "USER_PASSWORD_POLICY_VIOLATION"
+    assert exc_info.value.details == {"rules": ["letter_required"]}

@@ -49,6 +49,7 @@ def make_user_and_session() -> tuple[User, UserSession]:
         password_hash="$argon2",
         user_name="홍길동",
         account_status="ACTIVE",
+        updated_at=datetime(2026, 7, 17, 5, 10, 0),
     )
     session = UserSession(
         user_session_id=10,

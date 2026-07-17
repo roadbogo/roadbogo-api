@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -17,7 +17,7 @@ from app.schemas.auth import (
     PasswordResetRequest,
     PasswordResetRequestData,
     RegisterData,
-    RegisterRequest,
+    UpdateMeRequest,
 )
 from app.schemas.common import SuccessResponse
 from app.services import auth as auth_service
@@ -44,24 +44,6 @@ def _delete_refresh_cookie(response: Response) -> None:
         secure=auth_service.refresh_cookie_secure(settings),
         httponly=True,
         samesite="lax",
-    )
-
-
-@router.post(
-    "/register",
-    status_code=status.HTTP_201_CREATED,
-    response_model=SuccessResponse[RegisterData],
-)
-def register(
-    request: Request,
-    payload: RegisterRequest,
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    user = auth_service.register_user(db, payload)
-    return success_response(
-        data={"user": user.model_dump()},
-        message="회원가입이 완료되었습니다.",
-        trace_id=request.state.trace_id,
     )
 
 
@@ -129,6 +111,21 @@ def me(
 ) -> dict[str, Any]:
     return success_response(
         data={"user": current_user.summary.model_dump()},
+        trace_id=request.state.trace_id,
+    )
+
+
+@router.patch("/me", response_model=SuccessResponse[RegisterData])
+def update_me(
+    request: Request,
+    payload: UpdateMeRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    user = auth_service.update_current_user_profile(db, current_user.user, payload)
+    return success_response(
+        data={"user": user.model_dump()},
+        message="본인 정보가 수정되었습니다.",
         trace_id=request.state.trace_id,
     )
 

@@ -1,14 +1,17 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
+import re
 from uuid import uuid4
 
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import Select, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, settings
 from app.core.exceptions import AppException
+from app.core.password_policy import PasswordPolicyError, validate_password_policy
 from app.core.security import (
     create_access_token,
     generate_password_reset_token,
@@ -23,10 +26,12 @@ from app.models.auth import Permission, Role, RolePermission, User, UserRole, Us
 from app.schemas.auth import (
     AuthTokenData,
     LoginRequest,
+    OrganizationSummary,
     PasswordResetConfirmRequest,
     PasswordResetRequest,
     PasswordResetRequestData,
     RegisterRequest,
+    UpdateMeRequest,
     UserSummary,
 )
 from app.services import mail
@@ -35,6 +40,7 @@ ACTIVE = "ACTIVE"
 GENERAL_USER = "GENERAL_USER"
 CLIENT_TYPE_WEB = "WEB"
 COOKIE_PATH = "/api/v1/auth"
+PHONE_PATTERN = re.compile(r"^\+?[0-9]{8,15}$")
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,65 @@ def account_unavailable() -> AppException:
     return auth_error(403, "AUTH_ACCOUNT_UNAVAILABLE", "Account is unavailable.")
 
 
+def password_policy_error(exc: PasswordPolicyError) -> AppException:
+    return auth_error(
+        422,
+        "USER_PASSWORD_POLICY_VIOLATION",
+        "Password does not satisfy the policy.",
+        details={"rules": [violation.rule for violation in exc.violations]},
+    )
+
+
+def phone_encryption_unavailable() -> AppException:
+    return auth_error(
+        503,
+        "AUTH_PHONE_ENCRYPTION_UNAVAILABLE",
+        "Phone encryption is unavailable.",
+    )
+
+
+def _get_phone_fernet(config: Settings = settings) -> Fernet:
+    key = config.auth_phone_encryption_key
+    if key is None:
+        raise phone_encryption_unavailable()
+    try:
+        return Fernet(key.get_secret_value().encode("utf-8"))
+    except (ValueError, TypeError) as exc:
+        raise phone_encryption_unavailable() from exc
+
+
+def normalize_phone(value: str) -> str:
+    normalized = re.sub(r"[\s\-().]", "", value.strip())
+    if not PHONE_PATTERN.fullmatch(normalized):
+        raise auth_error(
+            422,
+            "AUTH_PHONE_INVALID",
+            "Invalid phone number.",
+            details={"rules": ["phone_format"]},
+        )
+    return normalized
+
+
+def encrypt_phone(value: str, config: Settings = settings) -> bytes:
+    return _get_phone_fernet(config).encrypt(value.encode("utf-8"))
+
+
+def decrypt_phone(value: bytes | None, config: Settings = settings) -> str | None:
+    if value is None:
+        return None
+    try:
+        return _get_phone_fernet(config).decrypt(value).decode("utf-8")
+    except InvalidToken as exc:
+        raise phone_encryption_unavailable() from exc
+
+
+def ensure_password_policy(password: str) -> None:
+    try:
+        validate_password_policy(password)
+    except PasswordPolicyError as exc:
+        raise password_policy_error(exc) from exc
+
+
 def _user_by_email_statement(email: str) -> Select[tuple[User]]:
     return select(User).where(User.email == email)
 
@@ -124,17 +189,29 @@ def collect_user_summary(db: Session, user: User) -> UserSummary:
     permissions = sorted(
         {permission_code for _role_code, permission_code in rows if permission_code}
     )
+    organization = None
+    if user.organization is not None:
+        organization = OrganizationSummary(
+            public_id=user.organization.public_id,
+            organization_name=user.organization.organization_name,
+            organization_type=user.organization.organization_type,
+        )
     return UserSummary(
         public_id=user.public_id,
         email=user.email,
         user_name=user.user_name,
+        phone=decrypt_phone(user.phone_encrypted),
         account_status=user.account_status,
+        organization=organization,
         roles=roles,
         permissions=permissions,
+        last_login_at=user.last_login_at,
+        updated_at=user.updated_at,
     )
 
 
 def register_user(db: Session, request: RegisterRequest) -> UserSummary:
+    ensure_password_policy(request.password)
     existing = db.execute(_user_by_email_statement(request.email)).scalar_one_or_none()
     if existing is not None:
         raise auth_error(409, "AUTH_EMAIL_ALREADY_EXISTS", "Email already exists.")
@@ -173,6 +250,35 @@ def register_user(db: Session, request: RegisterRequest) -> UserSummary:
     return user_summary
 
 
+def update_current_user_profile(
+    db: Session,
+    user: User,
+    request: UpdateMeRequest,
+) -> UserSummary:
+    previous_user_name = user.user_name
+    previous_phone_encrypted = user.phone_encrypted
+    try:
+        if "user_name" in request.model_fields_set and request.user_name is not None:
+            user.user_name = request.user_name
+        if "phone" in request.model_fields_set:
+            if request.phone is None:
+                user.phone_encrypted = None
+            else:
+                user.phone_encrypted = encrypt_phone(normalize_phone(request.phone))
+
+        db.flush()
+        db.refresh(user, attribute_names=["updated_at"])
+        user_summary = collect_user_summary(db, user)
+        db.commit()
+    except Exception:
+        db.rollback()
+        user.user_name = previous_user_name
+        user.phone_encrypted = previous_phone_encrypted
+        raise
+
+    return user_summary
+
+
 def issue_auth_tokens(
     db: Session,
     user: User,
@@ -181,6 +287,7 @@ def issue_auth_tokens(
     remember_me: bool = False,
     ip_address: str | None = None,
     user_agent: str | None = None,
+    update_last_login: bool = False,
 ) -> RefreshResult:
     now = utc_now_naive()
     raw_refresh_token = generate_refresh_token()
@@ -208,8 +315,11 @@ def issue_auth_tokens(
         remember_me = bool(session.is_persistent)
 
     try:
-        user.last_login_at = now
+        if update_last_login:
+            user.last_login_at = now
         db.flush()
+        if update_last_login:
+            db.refresh(user, attribute_names=["updated_at"])
         access_token = create_access_token(user.public_id, session.public_id)
         user_summary = collect_user_summary(db, user)
         db.commit()
@@ -218,7 +328,8 @@ def issue_auth_tokens(
         if previous_refresh_token_hash is not None:
             session.refresh_token_hash = previous_refresh_token_hash
             session.expires_at = previous_expires_at
-        user.last_login_at = previous_last_login_at
+        if update_last_login:
+            user.last_login_at = previous_last_login_at
         raise
 
     expires_in = settings.auth_access_token_expire_minutes * 60
@@ -257,6 +368,7 @@ def login_user(
         remember_me=request.remember_me,
         ip_address=ip_address,
         user_agent=user_agent,
+        update_last_login=True,
     )
 
 
@@ -317,7 +429,12 @@ def request_password_reset(
     db.commit()
 
     if mail.is_smtp_configured(config):
-        mail.send_password_reset_email(to_email=user.email, reset_url=reset_url, config=config)
+        mail.send_password_reset_email(
+            to_email=user.email,
+            reset_url=reset_url,
+            config=config,
+            expire_minutes=config.auth_password_reset_expire_minutes,
+        )
 
     if debug_allowed:
         data.debug_reset_token = raw_token
@@ -327,6 +444,7 @@ def request_password_reset(
 
 
 def confirm_password_reset(db: Session, request: PasswordResetConfirmRequest) -> None:
+    ensure_password_policy(request.new_password)
     token_hash = hash_password_reset_token(request.token)
     user = db.execute(
         select(User).where(User.password_reset_token_hash == token_hash).with_for_update()

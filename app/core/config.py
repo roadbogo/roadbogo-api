@@ -129,6 +129,10 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="AUTH_PASSWORD_RESET_DEBUG_RESPONSE",
     )
+    auth_phone_encryption_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="AUTH_PHONE_ENCRYPTION_KEY",
+    )
     smtp_host: str | None = Field(default=None, validation_alias="SMTP_HOST")
     smtp_port: int = Field(default=587, validation_alias="SMTP_PORT")
     smtp_username: str | None = Field(default=None, validation_alias="SMTP_USERNAME")
