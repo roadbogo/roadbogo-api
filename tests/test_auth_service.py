@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from cryptography.fernet import Fernet
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings
 from app.core.security import hash_password, hash_password_reset_token, hash_refresh_token
@@ -224,6 +225,16 @@ def test_register_user_assigns_general_user_and_hashes_password() -> None:
     assert user.password_hash.startswith("$argon2")
     assert user.password_hash != "password123"
     assert summary.roles == ["GENERAL_USER"]
+    assert summary.permissions == []
+    assert summary.account_status == "ACTIVE"
+    assert summary.organization is None
+    assert summary.phone is None
+    assert summary.last_login_at is None
+    assert summary.updated_at == datetime(2026, 7, 17, 5, 10, 1)
+    assert user.organization_id is None
+    assert user.phone_encrypted is None
+    assert user.last_login_at is None
+    assert user.deleted_at is None
     assert not hasattr(summary, "user_id")
 
 
@@ -262,6 +273,44 @@ def test_register_user_duplicate_email_raises_409() -> None:
 
     assert exc_info.value.code == "AUTH_EMAIL_ALREADY_EXISTS"
     assert exc_info.value.status_code == 409
+
+
+def test_register_user_missing_general_user_role_raises_safe_error() -> None:
+    db = AuthFakeDb(role=None)
+
+    with pytest.raises(Exception) as exc_info:
+        auth_service.register_user(
+            db,
+            RegisterRequest(
+                email="new@example.com",
+                user_name="Hong Gil Dong",
+                password="password123",
+                password_confirmation="password123",
+            ),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.code == "AUTH_GENERAL_USER_ROLE_NOT_CONFIGURED"
+    assert "role_id" not in exc_info.value.message
+
+
+def test_register_user_rolls_back_on_integrity_error() -> None:
+    db = AuthFakeDb(role=general_role(), fail_flush=IntegrityError("stmt", "params", Exception()))
+
+    with pytest.raises(Exception) as exc_info:
+        auth_service.register_user(
+            db,
+            RegisterRequest(
+                email="new@example.com",
+                user_name="Hong Gil Dong",
+                password="password123",
+                password_confirmation="password123",
+            ),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.code == "AUTH_EMAIL_ALREADY_EXISTS"
+    assert db.rolled_back is True
 
 
 def test_login_missing_user_uses_dummy_and_same_invalid_error(monkeypatch) -> None:
@@ -581,9 +630,18 @@ def test_register_user_builds_summary_before_commit() -> None:
     )
 
     interesting_order = [
-        item for item in db.order if item in {"flush", "add:UserRole", "summary", "commit"}
+        item
+        for item in db.order
+        if item in {"flush", "add:UserRole", "refresh:User", "summary", "commit"}
     ]
-    assert interesting_order == ["flush", "add:UserRole", "flush", "summary", "commit"]
+    assert interesting_order == [
+        "flush",
+        "add:UserRole",
+        "flush",
+        "refresh:User",
+        "summary",
+        "commit",
+    ]
     assert db.order[-1] == "commit"
 
 
@@ -625,7 +683,26 @@ def test_register_user_does_not_refresh_after_commit() -> None:
     )
 
     assert db.order[-1] == "commit"
-    assert not any(item.startswith("refresh:") for item in db.order)
+    assert db.order.index("refresh:User") < db.order.index("commit")
+
+
+def test_register_user_rolls_back_when_commit_fails() -> None:
+    db = AuthFakeDb(role=general_role(), fail_commit=RuntimeError("commit failed"))
+
+    with pytest.raises(RuntimeError):
+        auth_service.register_user(
+            db,
+            RegisterRequest(
+                email="new@example.com",
+                user_name="Hong Gil Dong",
+                password="password123",
+                password_confirmation="password123",
+            ),
+        )
+
+    assert db.committed is False
+    assert db.rolled_back is True
+    assert db.order[-2:] == ["commit", "rollback"]
 
 
 def test_collect_user_summary_deduplicates_and_serializes_profile(monkeypatch) -> None:
