@@ -5,6 +5,7 @@ from app.schemas.auth import (
     LoginRequest,
     PasswordResetConfirmRequest,
     RegisterRequest,
+    UpdateMeRequest,
 )
 
 
@@ -48,3 +49,17 @@ def test_password_confirmations_must_match() -> None:
 def test_login_request_rejects_invalid_email() -> None:
     with pytest.raises(ValidationError):
         LoginRequest(email="not-an-email", password="password123")
+
+
+def test_update_me_request_requires_allowed_fields() -> None:
+    assert UpdateMeRequest(user_name="Hong Gil Dong").user_name == "Hong Gil Dong"
+    assert UpdateMeRequest(phone=None).phone is None
+
+    with pytest.raises(ValidationError):
+        UpdateMeRequest()
+
+    with pytest.raises(ValidationError):
+        UpdateMeRequest(user_name=None)
+
+    with pytest.raises(ValidationError):
+        UpdateMeRequest(email="user@example.com")

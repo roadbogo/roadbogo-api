@@ -11,11 +11,25 @@ from app.schemas.auth import AuthTokenData, UserSummary
 from app.services.auth import RefreshResult
 
 
+USER_FIELD_SET = {
+    "public_id",
+    "email",
+    "user_name",
+    "phone",
+    "account_status",
+    "organization",
+    "roles",
+    "permissions",
+    "last_login_at",
+    "updated_at",
+}
+
+
 @dataclass
 class DummyUser:
     public_id: str = "user-public-id"
     email: str = "user@example.com"
-    user_name: str = "홍길동"
+    user_name: str = "Hong Gil Dong"
     account_status: str = "ACTIVE"
 
 
@@ -28,10 +42,14 @@ def user_summary() -> UserSummary:
     return UserSummary(
         public_id="user-public-id",
         email="user@example.com",
-        user_name="홍길동",
+        user_name="Hong Gil Dong",
+        phone=None,
         account_status="ACTIVE",
+        organization=None,
         roles=["GENERAL_USER"],
         permissions=[],
+        last_login_at=None,
+        updated_at="2026-07-17T05:10:00.000Z",
     )
 
 
@@ -54,26 +72,28 @@ def client_with_dummy_db() -> TestClient:
     return TestClient(app)
 
 
-def test_register_response_contract(monkeypatch) -> None:
-    monkeypatch.setattr(auth_api.auth_service, "register_user", lambda db, payload: user_summary())
+def test_public_register_is_not_exposed() -> None:
     client = client_with_dummy_db()
 
     response = client.post(
         "/api/v1/auth/register",
         json={
             "email": "USER@example.com",
-            "user_name": "홍길동",
+            "user_name": "Hong Gil Dong",
             "password": "password123",
             "password_confirmation": "password123",
         },
     )
 
-    body = response.json()
-    assert response.status_code == 201
-    assert body["success"] is True
-    assert body["data"]["user"]["roles"] == ["GENERAL_USER"]
-    assert "user_id" not in body["data"]["user"]
-    assert body["message"] == "회원가입이 완료되었습니다."
+    assert response.status_code == 404
+
+
+def test_public_register_is_not_in_openapi() -> None:
+    client = client_with_dummy_db()
+
+    response = client.get("/openapi.json")
+
+    assert "/api/v1/auth/register" not in response.json()["paths"]
 
 
 def test_login_sets_httponly_session_or_persistent_cookie(monkeypatch) -> None:
@@ -91,6 +111,9 @@ def test_login_sets_httponly_session_or_persistent_cookie(monkeypatch) -> None:
 
     cookie = response.headers["set-cookie"].lower()
     assert response.json()["data"]["access_token"] == "access-token"
+    assert set(response.json()["data"]["user"]) == USER_FIELD_SET
+    assert response.json()["data"]["user"]["updated_at"] == "2026-07-17T05:10:00.000Z"
+    assert ".000Z" in response.json()["data"]["user"]["updated_at"]
     assert "httponly" in cookie
     assert "samesite=lax" in cookie
     assert "path=/api/v1/auth" in cookie
@@ -125,7 +148,13 @@ def test_refresh_rotates_cookie_and_logout_deletes_cookie(monkeypatch) -> None:
 
     response = client.post("/api/v1/auth/refresh")
     assert response.status_code == 200
-    assert response.json()["data"]["access_token"] == "access-token"
+    data = response.json()["data"]
+    assert data["access_token"] == "access-token"
+    assert data["token_type"] == "Bearer"
+    assert data["expires_in"] == 1800
+    assert set(data["user"]) == USER_FIELD_SET
+    assert data["user"]["updated_at"].endswith("Z")
+    assert ".000Z" in data["user"]["updated_at"]
     assert "raw-refresh-token" in response.headers["set-cookie"]
 
     response = client.post("/api/v1/auth/logout")
@@ -171,7 +200,60 @@ def test_me_uses_current_user_dependency() -> None:
     response = client.get("/api/v1/auth/me", headers={"Authorization": "Bearer access-token"})
 
     assert response.status_code == 200
-    assert response.json()["data"]["user"]["email"] == "user@example.com"
+    user = response.json()["data"]["user"]
+    assert response.json()["data"].keys() == {"user"}
+    assert set(user) == USER_FIELD_SET
+    assert user["email"] == "user@example.com"
+    assert user["updated_at"].endswith("Z")
+    assert ".000Z" in user["updated_at"]
+
+
+def test_update_me_uses_current_user_dependency(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auth_api.auth_service,
+        "update_current_user_profile",
+        lambda db, user, payload: user_summary(),
+    )
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(
+        user=DummyUser(),
+        session=DummySession(),
+        summary=user_summary(),
+    )
+    client = TestClient(app)
+
+    response = client.patch(
+        "/api/v1/auth/me",
+        headers={"Authorization": "Bearer access-token"},
+        json={"user_name": "Hong Gil Dong"},
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["message"] == "본인 정보가 수정되었습니다."
+    assert set(body["data"]["user"]) == USER_FIELD_SET
+    assert body["data"]["user"]["public_id"] == "user-public-id"
+    assert body["data"]["user"]["updated_at"] == "2026-07-17T05:10:00.000Z"
+    assert "user_id" not in body["data"]["user"]
+
+
+def test_update_me_rejects_unknown_fields() -> None:
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(
+        user=DummyUser(),
+        session=DummySession(),
+        summary=user_summary(),
+    )
+    client = TestClient(app)
+
+    response = client.patch(
+        "/api/v1/auth/me",
+        headers={"Authorization": "Bearer access-token"},
+        json={"email": "other@example.com"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_password_reset_request_debug_contract(monkeypatch) -> None:

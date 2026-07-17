@@ -58,6 +58,19 @@ def test_auth_jwt_secret_key_repr_does_not_expose_secret(
     assert settings.auth_jwt_secret_key.get_secret_value() == secret
 
 
+def test_phone_encryption_key_repr_does_not_expose_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "x" * 44
+    monkeypatch.setenv("AUTH_PHONE_ENCRYPTION_KEY", secret)
+
+    settings = Settings(_env_file=None)
+
+    assert secret not in repr(settings.auth_phone_encryption_key)
+    assert settings.auth_phone_encryption_key is not None
+    assert settings.auth_phone_encryption_key.get_secret_value() == secret
+
+
 def test_auth_settings_accept_environment_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
