@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app.api.v1 import auth as auth_api
 from app.core.database import get_db
@@ -72,7 +73,8 @@ def client_with_dummy_db() -> TestClient:
     return TestClient(app)
 
 
-def test_public_register_is_not_exposed() -> None:
+def test_register_response_contract(monkeypatch) -> None:
+    monkeypatch.setattr(auth_api.auth_service, "register_user", lambda db, payload: user_summary())
     client = client_with_dummy_db()
 
     response = client.post(
@@ -84,16 +86,70 @@ def test_public_register_is_not_exposed() -> None:
             "password_confirmation": "password123",
         },
     )
+    body = response.json()
 
-    assert response.status_code == 404
+    assert response.status_code == 201
+    assert body["success"] is True
+    assert body["data"].keys() == {"user"}
+    assert set(body["data"]["user"]) == USER_FIELD_SET
+    assert body["data"]["user"]["email"] == "user@example.com"
+    assert body["data"]["user"]["roles"] == ["GENERAL_USER"]
+    assert body["data"]["user"]["account_status"] == "ACTIVE"
+    assert body["data"]["user"]["organization"] is None
+    assert body["data"]["user"]["phone"] is None
+    assert body["data"]["user"]["last_login_at"] is None
+    assert body["data"]["user"]["updated_at"].endswith("Z")
+    assert body["message"] == "회원가입이 완료되었습니다."
+    assert "access_token" not in body["data"]
+    assert "refresh_token" not in response.text
+    assert "set-cookie" not in response.headers
+    assert "user_id" not in body["data"]["user"]
+    assert "password_hash" not in body["data"]["user"]
+    assert "phone_encrypted" not in body["data"]["user"]
 
 
-def test_public_register_is_not_in_openapi() -> None:
+def test_public_register_is_in_openapi() -> None:
     client = client_with_dummy_db()
 
     response = client.get("/openapi.json")
 
-    assert "/api/v1/auth/register" not in response.json()["paths"]
+    assert "/api/v1/auth/register" in response.json()["paths"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "role",
+        "roles",
+        "organization_id",
+        "organization_public_id",
+        "account_status",
+        "permissions",
+        "phone",
+    ],
+)
+def test_register_rejects_forbidden_fields(field: str) -> None:
+    client = client_with_dummy_db()
+    payload = {
+        "email": "user@example.com",
+        "user_name": "Hong Gil Dong",
+        "password": "password123",
+        "password_confirmation": "password123",
+        field: "forbidden",
+    }
+
+    response = client.post("/api/v1/auth/register", json=payload)
+
+    assert response.status_code == 422
+    assert "password123" not in response.text
+
+
+def test_register_rejects_empty_payload() -> None:
+    client = client_with_dummy_db()
+
+    response = client.post("/api/v1/auth/register", json={})
+
+    assert response.status_code == 422
 
 
 def test_login_sets_httponly_session_or_persistent_cookie(monkeypatch) -> None:
