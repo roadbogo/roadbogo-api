@@ -814,7 +814,10 @@ def test_update_current_user_profile_allows_phone_delete_without_key() -> None:
     assert summary.updated_at != original_updated_at
 
 
-def test_update_current_user_profile_requires_key_for_phone_write() -> None:
+def test_update_current_user_profile_requires_key_for_phone_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(auth_service.settings, "auth_phone_encryption_key", None)
     user = active_user()
 
     with pytest.raises(Exception) as exc_info:
