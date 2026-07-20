@@ -5,28 +5,32 @@ from __future__ import annotations
 import os
 from uuid import uuid4
 
-from sqlalchemy import select
-
-from app.core.config import settings
-from app.core.database import SessionLocal
-from app.core.security import hash_password
-from app.models.auth import Organization, Role, User, UserRole
-from app.services.auth import collect_user_summary
-
 ALLOWED_ENVIRONMENTS = {"local", "test"}
 DEFAULT_EMAIL = "dev.controller@roadbogo.local"
 LOCAL_CONTROL_CENTER_CODE = "LOCAL_CONTROL_CENTER"
 
 
-def require_development_environment(app_env: str) -> None:
-    if app_env.lower() not in ALLOWED_ENVIRONMENTS:
+def require_development_environment(app_env: str | None) -> None:
+    if app_env is None or app_env.lower() not in ALLOWED_ENVIRONMENTS:
         raise RuntimeError(
-            "Development controller bootstrap is allowed only when APP_ENV is local or test."
+            "Development controller bootstrap requires APP_ENV to be explicitly set "
+            "to local or test."
         )
 
 
 def bootstrap() -> None:
-    require_development_environment(settings.app_env)
+    from sqlalchemy import select
+
+    from app.core.config import settings
+    from app.core.database import SessionLocal
+    from app.core.security import hash_password
+    from app.models.auth import Organization, Role, User, UserRole
+    from app.services.auth import collect_user_summary
+
+    configured_app_env = (
+        settings.app_env if "app_env" in settings.model_fields_set else None
+    )
+    require_development_environment(configured_app_env)
     email = os.getenv("DEV_CONTROLLER_EMAIL", DEFAULT_EMAIL).strip().lower()
     password = os.getenv("DEV_CONTROLLER_PASSWORD", "")
     if not password:

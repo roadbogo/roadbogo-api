@@ -52,11 +52,13 @@ python scripts/bootstrap_dev_controller.py
 Remove-Item Env:DEV_CONTROLLER_PASSWORD
 ```
 
-The command refuses to run unless `APP_ENV` is `local` or `test`. It uses the
-seeded `CONTROLLER` role, its existing permissions, and the first active
+The command refuses to run unless `APP_ENV` is explicitly configured as
+`local` or `test`; the application's default value is not sufficient. It uses
+the seeded `CONTROLLER` role, its existing permissions, and the first active
 `CONTROL_CENTER` organization. If no such organization exists, it creates the
 idempotent `LOCAL_CONTROL_CENTER` development organization. Set
-`DEV_CONTROLLER_EMAIL` only when a different local email is needed.
+`DEV_CONTROLLER_EMAIL` only when a different local email is needed. Existing
+accounts are reported and left unchanged.
 
 ## Database Migration
 
