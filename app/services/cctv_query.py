@@ -15,6 +15,7 @@ def _stream(cctv: Cctv, now: datetime) -> CctvStream | None:
         for stream in cctv.cctv_streams
         if stream.is_primary
         and stream.stream_status == "ACTIVE"
+        and stream.valid_from <= now
         and (stream.valid_to is None or stream.valid_to > now)
     ]
     return max(candidates, key=lambda stream: stream.valid_from, default=None)

@@ -77,14 +77,14 @@ def _cctv(*, streams=(), deleted_at=None):
     )
 
 
-def _stream(*, status="ACTIVE", primary=True, valid_to=None):
+def _stream(*, status="ACTIVE", primary=True, valid_from=None, valid_to=None):
     return SimpleNamespace(
         stream_type="LIVE",
         protocol_type="HLS",
         endpoint_secret_ref="must-not-leak",
         stream_status=status,
         is_primary=primary,
-        valid_from=_dt(0),
+        valid_from=valid_from or _dt(0),
         valid_to=valid_to,
     )
 
@@ -196,6 +196,21 @@ def test_stream_excludes_expired_non_primary_and_inactive() -> None:
     assert cctv_query._stream(
         _cctv(streams=[_stream(primary=False), _stream(status="ERROR")]), now
     ) is None
+
+
+def test_stream_excludes_future_valid_from() -> None:
+    now = _dt(3)
+
+    assert cctv_query._stream(
+        _cctv(streams=[_stream(valid_from=_dt(4))]), now
+    ) is None
+
+
+def test_stream_allows_valid_from_equal_to_now() -> None:
+    now = _dt(3)
+    stream = _stream(valid_from=now)
+
+    assert cctv_query._stream(_cctv(streams=[stream]), now) is stream
 
 
 def test_fallback_query_uses_only_completed_cctv_metadata() -> None:
