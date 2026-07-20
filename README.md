@@ -42,6 +42,22 @@ Health check:
 curl http://localhost:8000/api/v1/health
 ```
 
+### Local controller account
+
+After applying migrations, create an idempotent controller account for local integration tests:
+
+```powershell
+$env:DEV_CONTROLLER_PASSWORD="<local-development-password>"
+python scripts/bootstrap_dev_controller.py
+Remove-Item Env:DEV_CONTROLLER_PASSWORD
+```
+
+The command refuses to run unless `APP_ENV` is `local` or `test`. It uses the
+seeded `CONTROLLER` role, its existing permissions, and the first active
+`CONTROL_CENTER` organization. If no such organization exists, it creates the
+idempotent `LOCAL_CONTROL_CENTER` development organization. Set
+`DEV_CONTROLLER_EMAIL` only when a different local email is needed.
+
 ## Database Migration
 
 Apply the verified MVP schema, reference seed data, and views:
