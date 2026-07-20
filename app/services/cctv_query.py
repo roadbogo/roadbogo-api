@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -70,7 +70,7 @@ def list_cctvs(db: Session, *, page: int, size: int, filters: dict, sort: str) -
         .offset((page - 1) * size)
         .limit(size)
     )
-    now = datetime.utcnow()
+    now = datetime.now(UTC).replace(tzinfo=None)
     items = []
     for cctv in db.scalars(stmt).unique():
         road, section = _road(cctv)
@@ -93,7 +93,14 @@ def list_cctvs(db: Session, *, page: int, size: int, filters: dict, sort: str) -
             }
         )
     latest_sync = db.scalars(
-        select(ItsSyncRun).order_by(ItsSyncRun.started_at.desc()).limit(1)
+        select(ItsSyncRun)
+        .where(
+            ItsSyncRun.sync_type == "CCTV_METADATA",
+            ItsSyncRun.run_status.in_(("SUCCEEDED", "PARTIAL")),
+            ItsSyncRun.finished_at.is_not(None),
+        )
+        .order_by(ItsSyncRun.finished_at.desc())
+        .limit(1)
     ).first()
     return {
         "items": items,
@@ -113,7 +120,7 @@ def get_cctv(db: Session, public_id: str) -> dict:
     ).unique().first()
     if cctv is None:
         raise AppException(404, "CCTV_NOT_FOUND", "CCTV 정보를 찾을 수 없습니다.")
-    stream = _stream(cctv, datetime.utcnow())
+    stream = _stream(cctv, datetime.now(UTC).replace(tzinfo=None))
     road, section = _road(cctv)
     return {
         "public_id": cctv.public_id,

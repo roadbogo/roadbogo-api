@@ -26,3 +26,24 @@ def test_permission_dependency_rejects_a_missing_permission() -> None:
 
     assert error.value.status_code == 403
     assert error.value.code == "AUTH_PERMISSION_DENIED"
+
+
+def test_role_without_permission_is_rejected() -> None:
+    dependency = require_permissions("CCTV.READ")
+    user = SimpleNamespace(
+        summary=SimpleNamespace(roles=["CONTROL_MANAGER"], permissions=[])
+    )
+
+    with pytest.raises(AppException) as error:
+        dependency(current_user=user)
+
+    assert error.value.code == "AUTH_PERMISSION_DENIED"
+
+
+def test_all_permissions_are_required_not_just_one() -> None:
+    dependency = require_permissions("INCIDENT.READ_ALL", "CCTV.READ")
+
+    with pytest.raises(AppException) as error:
+        dependency(current_user=current_user("CCTV.READ"))
+
+    assert error.value.status_code == 403

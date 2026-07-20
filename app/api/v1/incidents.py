@@ -12,7 +12,13 @@ from app.core.responses import success_response
 from app.dependencies.auth import CurrentUser
 from app.dependencies.permissions import require_permissions
 from app.schemas.common import SuccessResponse
-from app.schemas.incident import IncidentDetailData, IncidentSummaryData, PaginatedData
+from app.schemas.incident import (
+    IncidentDetailData,
+    IncidentEvidenceListData,
+    IncidentHistoryListData,
+    IncidentListData,
+    IncidentSummaryData,
+)
 from app.services import incident_query
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
@@ -53,7 +59,7 @@ def get_summary(
     return success_response(data=data, trace_id=request.state.trace_id)
 
 
-@router.get("", response_model=SuccessResponse[PaginatedData])
+@router.get("", response_model=SuccessResponse[IncidentListData])
 def get_incidents(
     request: Request,
     current_user: IncidentPermission,
@@ -97,7 +103,10 @@ def get_incident(
     )
 
 
-@router.get("/{incident_public_id}/evidences", response_model=SuccessResponse[PaginatedData])
+@router.get(
+    "/{incident_public_id}/evidences",
+    response_model=SuccessResponse[IncidentEvidenceListData],
+)
 def get_evidences(
     incident_public_id: UUID,
     request: Request,
@@ -117,7 +126,10 @@ def get_evidences(
     )
 
 
-@router.get("/{incident_public_id}/histories", response_model=SuccessResponse[PaginatedData])
+@router.get(
+    "/{incident_public_id}/histories",
+    response_model=SuccessResponse[IncidentHistoryListData],
+)
 def get_histories(
     incident_public_id: UUID,
     request: Request,
