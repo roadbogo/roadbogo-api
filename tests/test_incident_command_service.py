@@ -80,7 +80,8 @@ def _incident(status, version=0, controller_id=None):
 
 def _execute(command, incident, *, current_user=None, expected=None, extra=()):
     current_user = current_user or _user()
-    db = FakeSession([None, incident, object(), *extra])
+    command_values = [None, object()] if command == "claim" else [object()]
+    db = FakeSession([None, incident, *command_values, *extra])
     result = incident_command.execute_command(
         db,
         command=command,
@@ -134,7 +135,7 @@ def test_claim_creates_active_claim_and_assigns_controller() -> None:
     incident = _incident("ACKNOWLEDGED", version=1)
     user = _user()
 
-    db, result = _execute("claim", incident, current_user=user, extra=(None,))
+    db, result = _execute("claim", incident, current_user=user)
 
     claim = _added(db, IncidentClaim)[0]
     assert claim.controller_user_id == user.user.user_id
@@ -147,7 +148,7 @@ def test_claim_creates_active_claim_and_assigns_controller() -> None:
 
 def test_claim_rejects_existing_active_claim() -> None:
     incident = _incident("ACKNOWLEDGED")
-    db = FakeSession([None, incident, object(), object()])
+    db = FakeSession([None, incident, object()])
 
     with pytest.raises(AppException) as error:
         incident_command.execute_command(
@@ -159,6 +160,49 @@ def test_claim_rejects_existing_active_claim() -> None:
     assert error.value.code == "INCIDENT_ALREADY_CLAIMED"
     assert db.rollback_count == 1
     assert db.commit_count == 0
+
+
+def test_concurrent_claim_returns_already_claimed_before_version_conflict() -> None:
+    incident = _incident("CLAIMED", version=2, controller_id=99)
+    db = FakeSession([None, incident])
+
+    with pytest.raises(AppException) as error:
+        incident_command.execute_command(
+            db, command="claim", incident_public_id=incident.public_id,
+            expected_version_no=1, idempotency_key=str(uuid4()),
+            current_user=_user(7), trace_id=str(uuid4())
+        )
+
+    assert error.value.code == "INCIDENT_ALREADY_CLAIMED"
+    assert error.value.code != "INCIDENT_VERSION_CONFLICT"
+
+
+def test_acknowledged_with_active_claim_returns_already_claimed() -> None:
+    incident = _incident("ACKNOWLEDGED", version=1)
+    db = FakeSession([None, incident, object()])
+
+    with pytest.raises(AppException) as error:
+        incident_command.execute_command(
+            db, command="claim", incident_public_id=incident.public_id,
+            expected_version_no=1, idempotency_key=str(uuid4()),
+            current_user=_user(), trace_id=str(uuid4())
+        )
+
+    assert error.value.code == "INCIDENT_ALREADY_CLAIMED"
+
+
+def test_acknowledged_without_claim_keeps_version_conflict() -> None:
+    incident = _incident("ACKNOWLEDGED", version=2)
+    db = FakeSession([None, incident, None])
+
+    with pytest.raises(AppException) as error:
+        incident_command.execute_command(
+            db, command="claim", incident_public_id=incident.public_id,
+            expected_version_no=1, idempotency_key=str(uuid4()),
+            current_user=_user(), trace_id=str(uuid4())
+        )
+
+    assert error.value.code == "INCIDENT_VERSION_CONFLICT"
 
 
 def test_review_requires_assigned_controller_and_preserves_claim_fields() -> None:
@@ -349,7 +393,7 @@ def test_concurrent_idempotency_insert_replays_completed_record() -> None:
 def test_claim_integrity_error_is_translated() -> None:
     incident = _incident("ACKNOWLEDGED")
     error = IntegrityError("insert", {}, RuntimeError("unique"))
-    db = FakeSession([None, incident, object(), None], fail_flush_at=2)
+    db = FakeSession([None, incident, None, object()], fail_flush_at=2)
 
     def fail_with_integrity():
         db.flush_count += 1

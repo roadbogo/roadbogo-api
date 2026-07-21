@@ -176,6 +176,14 @@ def _active_claim(db: Session, incident_id: int) -> IncidentClaim | None:
     ).first()
 
 
+def _already_claimed() -> AppException:
+    return _error(
+        409,
+        "INCIDENT_ALREADY_CLAIMED",
+        "다른 관제자가 이미 선점한 사건입니다.",
+    )
+
+
 def _event_payload(
     *, incident: Incident, previous_status: str, actor: CurrentUser,
     changed_at: datetime, trace_id: str, event_id: str
@@ -278,17 +286,16 @@ def execute_command(
             return _replay_or_reject(concurrent, request_hash)
 
         incident = _lock_incident(db, incident_public_id)
+        if command == "claim" and (
+            incident.incident_status == "CLAIMED"
+            or _active_claim(db, incident.incident_id) is not None
+        ):
+            raise _already_claimed()
         _validate_version(incident, expected_version_no)
         previous_status = incident.incident_status
         _validate_transition(db, previous_status, config.target_status)
 
         if command == "claim":
-            if _active_claim(db, incident.incident_id) is not None:
-                raise _error(
-                    409,
-                    "INCIDENT_ALREADY_CLAIMED",
-                    "다른 관제자가 이미 선점한 사건입니다.",
-                )
             claim = IncidentClaim(
                     public_id=str(uuid4()),
                     incident_id=incident.incident_id,
@@ -302,11 +309,7 @@ def execute_command(
             try:
                 db.flush()
             except IntegrityError as exc:
-                raise _error(
-                    409,
-                    "INCIDENT_ALREADY_CLAIMED",
-                    "다른 관제자가 이미 선점한 사건입니다.",
-                ) from exc
+                raise _already_claimed() from exc
             incident.current_controller_user_id = current_user.user.user_id
             incident.claimed_at = now
         elif command == "review":
