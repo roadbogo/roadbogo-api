@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import AfterValidator
 from sqlalchemy.orm import Session
 
@@ -19,11 +19,26 @@ from app.schemas.incident import (
     IncidentListData,
     IncidentSummaryData,
 )
-from app.services import incident_query
+from app.schemas.incident_command import (
+    IncidentAcknowledgeData,
+    IncidentClaimData,
+    IncidentCommandRequest,
+    IncidentReviewData,
+)
+from app.services import incident_command, incident_query
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 IncidentPermission = Annotated[
     CurrentUser, Depends(require_permissions("INCIDENT.READ_ALL"))
+]
+AcknowledgePermission = Annotated[
+    CurrentUser, Depends(require_permissions("INCIDENT.CLAIM"))
+]
+ClaimPermission = Annotated[
+    CurrentUser, Depends(require_permissions("INCIDENT.CLAIM"))
+]
+ReviewPermission = Annotated[
+    CurrentUser, Depends(require_permissions("INCIDENT.DECIDE"))
 ]
 
 
@@ -144,4 +159,80 @@ def get_histories(
             db, str(incident_public_id), page=page, size=size, sort=sort
         ),
         trace_id=request.state.trace_id,
+    )
+
+
+def _execute_command(
+    *, request: Request, db: Session, command: incident_command.Command,
+    incident_public_id: UUID, payload: IncidentCommandRequest,
+    idempotency_key: UUID, current_user: CurrentUser
+):
+    result = incident_command.execute_command(
+        db,
+        command=command,
+        incident_public_id=str(incident_public_id),
+        expected_version_no=payload.expected_version_no,
+        idempotency_key=str(idempotency_key),
+        current_user=current_user,
+        trace_id=request.state.trace_id,
+    )
+    return success_response(
+        data=result.data, message=result.message, trace_id=request.state.trace_id
+    )
+
+
+@router.post(
+    "/{incident_public_id}/acknowledge",
+    response_model=SuccessResponse[IncidentAcknowledgeData],
+)
+def acknowledge_incident(
+    incident_public_id: UUID,
+    payload: IncidentCommandRequest,
+    request: Request,
+    current_user: AcknowledgePermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    return _execute_command(
+        request=request, db=db, command="acknowledge",
+        incident_public_id=incident_public_id, payload=payload,
+        idempotency_key=idempotency_key, current_user=current_user,
+    )
+
+
+@router.post(
+    "/{incident_public_id}/claim",
+    response_model=SuccessResponse[IncidentClaimData],
+)
+def claim_incident(
+    incident_public_id: UUID,
+    payload: IncidentCommandRequest,
+    request: Request,
+    current_user: ClaimPermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    return _execute_command(
+        request=request, db=db, command="claim",
+        incident_public_id=incident_public_id, payload=payload,
+        idempotency_key=idempotency_key, current_user=current_user,
+    )
+
+
+@router.post(
+    "/{incident_public_id}/review",
+    response_model=SuccessResponse[IncidentReviewData],
+)
+def review_incident(
+    incident_public_id: UUID,
+    payload: IncidentCommandRequest,
+    request: Request,
+    current_user: ReviewPermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    return _execute_command(
+        request=request, db=db, command="review",
+        incident_public_id=incident_public_id, payload=payload,
+        idempotency_key=idempotency_key, current_user=current_user,
     )
