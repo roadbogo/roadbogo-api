@@ -25,7 +25,11 @@ from app.schemas.incident_command import (
     IncidentCommandRequest,
     IncidentReviewData,
 )
-from app.services import incident_command, incident_query
+from app.schemas.incident_decision import (
+    IncidentDecisionRequest,
+    IncidentDecisionResultData,
+)
+from app.services import incident_command, incident_decision, incident_query
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 IncidentPermission = Annotated[
@@ -38,6 +42,9 @@ ClaimPermission = Annotated[
     CurrentUser, Depends(require_permissions("INCIDENT.CLAIM"))
 ]
 ReviewPermission = Annotated[
+    CurrentUser, Depends(require_permissions("INCIDENT.DECIDE"))
+]
+DecisionPermission = Annotated[
     CurrentUser, Depends(require_permissions("INCIDENT.DECIDE"))
 ]
 
@@ -235,4 +242,33 @@ def review_incident(
         request=request, db=db, command="review",
         incident_public_id=incident_public_id, payload=payload,
         idempotency_key=idempotency_key, current_user=current_user,
+    )
+
+
+@router.post(
+    "/{incident_public_id}/decisions",
+    response_model=SuccessResponse[IncidentDecisionResultData],
+)
+def decide_incident(
+    incident_public_id: UUID,
+    payload: IncidentDecisionRequest,
+    request: Request,
+    current_user: DecisionPermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    result = incident_decision.decide_incident(
+        db,
+        incident_public_id=str(incident_public_id),
+        decision_type=payload.decision_type,
+        decision_reason=payload.decision_reason,
+        expected_version_no=payload.expected_version_no,
+        idempotency_key=str(idempotency_key),
+        current_user=current_user,
+        trace_id=request.state.trace_id,
+    )
+    return success_response(
+        data=result.data,
+        message=result.message,
+        trace_id=request.state.trace_id,
     )
