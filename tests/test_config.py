@@ -1,3 +1,6 @@
+import ast
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -23,6 +26,58 @@ def test_cors_origins_supports_comma_separated_env_string(
         "http://localhost:3000",
         "https://admin.example.com",
     ]
+
+
+def test_cors_origins_normalizes_whitespace_and_empty_items() -> None:
+    settings = Settings(
+        _env_file=None,
+        CORS_ORIGINS=" http://localhost:3000 ,,   , http://127.0.0.1:3000 ",
+    )
+
+    assert settings.cors_origins == [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
+def test_cors_origins_normalizes_list_input() -> None:
+    settings = Settings(
+        _env_file=None,
+        CORS_ORIGINS=[" http://localhost:3000 ", "", "http://127.0.0.1:3000"],
+    )
+
+    assert settings.cors_origins == [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
+@pytest.mark.parametrize("value", ["", "   ", [], "*", "http://localhost:3000,*"])
+def test_cors_origins_rejects_non_explicit_origins(value) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, CORS_ORIGINS=value)
+
+
+def test_cors_origins_preserves_default() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.cors_origins == ["http://localhost:3000"]
+
+
+def test_settings_defines_cors_validator_once() -> None:
+    config_path = Path(__file__).parents[1] / "app" / "core" / "config.py"
+    module = ast.parse(config_path.read_text(encoding="utf-8"))
+    settings_class = next(
+        node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Settings"
+    )
+
+    validators = [
+        node
+        for node in settings_class.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "parse_cors_origins"
+    ]
+    assert len(validators) == 1
 
 
 def test_cors_origins_rejects_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
