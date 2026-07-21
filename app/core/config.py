@@ -143,18 +143,11 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: Any) -> list[str] | Any:
-        if isinstance(value, str):
-            origins = [
-                origin.strip()
-                for origin in value.split(",")
-                if origin.strip()
-            ]
-            cls.validate_cors_origins(origins)
-            return origins
-
-        if isinstance(value, list):
-            cls.validate_cors_origins(value)
-            return value
+        if isinstance(value, (str, list)):
+            origins = value.split(",") if isinstance(value, str) else value
+            normalized = [origin.strip() for origin in origins if origin.strip()]
+            cls.validate_cors_origins(normalized)
+            return normalized
 
         return value
 
@@ -170,17 +163,6 @@ class Settings(BaseSettings):
                 "CORS_ORIGINS cannot include '*' "
                 "when credentials are enabled."
             )
-
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, value: str | list[str]) -> list[str]:  # noqa: F811
-        origins = value.split(",") if isinstance(value, str) else value
-        normalized = [origin.strip() for origin in origins if origin.strip()]
-
-        if not normalized or "*" in normalized:
-            raise ValueError("CORS_ORIGINS must contain explicit origins")
-
-        return normalized
 
     @field_validator("auth_jwt_secret_key")
     @classmethod

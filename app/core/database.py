@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import MetaData, create_engine
+from sqlalchemy import MetaData, create_engine, event
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -32,6 +32,15 @@ engine = create_engine(
     pool_pre_ping=True,
     pool_recycle=3600,
 )
+
+
+@event.listens_for(engine, "connect")
+def set_session_time_zone_utc(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("SET time_zone = '+00:00'")
+    finally:
+        cursor.close()
 
 SessionLocal = sessionmaker(
     bind=engine,
