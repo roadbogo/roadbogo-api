@@ -155,13 +155,43 @@ def execute(
                 raise
             return _replay(concurrent, request_hash)
 
+        preview = db.scalars(
+            select(DispatchRequest).where(
+                DispatchRequest.public_id == dispatch_public_id,
+                DispatchRequest.responder_user_id == current_user.user.user_id,
+            )
+        ).first()
+        if preview is None:
+            raise _error(404, "DISPATCH_NOT_FOUND", "출동 요청 정보를 찾을 수 없습니다.")
+        preview_incident_id = preview.incident_id
+        incident = db.scalars(
+            select(Incident)
+            .where(Incident.incident_id == preview_incident_id)
+            .with_for_update()
+        ).first()
+        if incident is None:
+            raise _error(404, "DISPATCH_NOT_FOUND", "출동 요청 정보를 찾을 수 없습니다.")
+        responder_profile = None
+        if command == "reject":
+            responder_profile = db.scalars(
+                select(ResponderProfile)
+                .where(ResponderProfile.user_id == current_user.user.user_id)
+                .with_for_update()
+            ).first()
+            if responder_profile is None:
+                raise _error(404, "DISPATCH_NOT_FOUND", "출동 요청 정보를 찾을 수 없습니다.")
         dispatch = db.scalars(
             select(DispatchRequest).where(
                 DispatchRequest.public_id == dispatch_public_id,
                 DispatchRequest.responder_user_id == current_user.user.user_id,
             ).with_for_update()
         ).first()
-        if dispatch is None:
+        if (
+            dispatch is None
+            or dispatch.public_id != dispatch_public_id
+            or dispatch.responder_user_id != current_user.user.user_id
+            or dispatch.incident_id != preview_incident_id
+        ):
             raise _error(404, "DISPATCH_NOT_FOUND", "출동 요청 정보를 찾을 수 없습니다.")
         if dispatch.version_no != expected_version_no:
             raise _error(
@@ -178,20 +208,6 @@ def execute(
                 {"current_status": dispatch.dispatch_status, "requested_status": target},
             )
         _transition(db, "REQUESTED", target)
-        responder_profile = None
-        if command == "reject":
-            responder_profile = db.scalars(
-                select(ResponderProfile)
-                .where(ResponderProfile.user_id == current_user.user.user_id)
-                .with_for_update()
-            ).first()
-            if responder_profile is None:
-                raise _error(404, "DISPATCH_NOT_FOUND", "출동 요청 정보를 찾을 수 없습니다.")
-        incident = db.scalars(
-            select(Incident).where(Incident.incident_id == dispatch.incident_id).with_for_update()
-        ).first()
-        if incident is None:
-            raise _error(409, "INCIDENT_INVALID_STATE_TRANSITION", "연결된 사건을 처리할 수 없습니다.")
 
         previous_dispatch_version = dispatch.version_no
         previous_incident_status = incident.incident_status
@@ -297,26 +313,41 @@ def execute(
                 publish_status="PENDING", retry_count=0, next_attempt_at=now,
             ))
 
-        data = {
-            "dispatch": {
-                "public_id": dispatch.public_id,
-                "previous_status": "REQUESTED",
-                "status": target,
-                "accepted_at": utc_z(now) if command == "accept" else None,
-                "rejection_reason": rejection_reason,
-                "version_no": dispatch.version_no,
-            },
-            "incident": {
-                "public_id": incident.public_id,
-                "previous_status": previous_incident_status if command == "accept" else None,
-                "status": incident.incident_status,
-                "version_no": incident.version_no,
-            },
-            "responder": (
-                {"public_id": current_user.user.public_id, "duty_status": "AVAILABLE"}
-                if command == "reject" else None
-            ),
-        }
+        if command == "accept":
+            data = {
+                "dispatch": {
+                    "public_id": dispatch.public_id,
+                    "previous_status": "REQUESTED",
+                    "status": target,
+                    "accepted_at": utc_z(now),
+                    "version_no": dispatch.version_no,
+                },
+                "incident": {
+                    "public_id": incident.public_id,
+                    "previous_status": previous_incident_status,
+                    "status": incident.incident_status,
+                    "version_no": incident.version_no,
+                },
+            }
+        else:
+            data = {
+                "dispatch": {
+                    "public_id": dispatch.public_id,
+                    "previous_status": "REQUESTED",
+                    "status": target,
+                    "rejection_reason": rejection_reason,
+                    "version_no": dispatch.version_no,
+                },
+                "incident": {
+                    "public_id": incident.public_id,
+                    "status": incident.incident_status,
+                    "version_no": incident.version_no,
+                },
+                "responder": {
+                    "public_id": current_user.user.public_id,
+                    "duty_status": "AVAILABLE",
+                },
+            }
         idempotency.processing_status = "COMPLETED"
         idempotency.resource_type = "DISPATCH"
         idempotency.resource_public_id = dispatch.public_id

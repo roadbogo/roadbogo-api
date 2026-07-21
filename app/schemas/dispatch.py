@@ -153,28 +153,46 @@ class DispatchRejectRequest(DispatchVersionRequest):
         return value
 
 
-class DispatchCommandDispatch(ReadResponseModel):
+class DispatchAcceptDispatch(ReadResponseModel):
     public_id: UUID
     previous_status: DispatchStatus
     status: DispatchStatus
+    accepted_at: UtcDateTimeString
     version_no: int
-    accepted_at: UtcDateTimeString | None = None
-    rejection_reason: str | None = None
 
 
-class DispatchCommandIncident(ReadResponseModel):
+class DispatchAcceptIncident(ReadResponseModel):
+    public_id: UUID
+    previous_status: IncidentStatus
+    status: IncidentStatus
+    version_no: int
+
+
+class DispatchAcceptData(ReadResponseModel):
+    dispatch: DispatchAcceptDispatch
+    incident: DispatchAcceptIncident
+
+
+class DispatchRejectDispatch(ReadResponseModel):
+    public_id: UUID
+    previous_status: DispatchStatus
+    status: DispatchStatus
+    rejection_reason: str
+    version_no: int
+
+
+class DispatchRejectIncident(ReadResponseModel):
     public_id: UUID
     status: IncidentStatus
     version_no: int
-    previous_status: IncidentStatus | None = None
 
 
-class DispatchCommandResponder(ReadResponseModel):
+class DispatchRejectResponder(ReadResponseModel):
     public_id: UUID
     duty_status: DutyStatus
 
 
-class DispatchCommandData(ReadResponseModel):
-    dispatch: DispatchCommandDispatch
-    incident: DispatchCommandIncident
-    responder: DispatchCommandResponder | None = None
+class DispatchRejectData(ReadResponseModel):
+    dispatch: DispatchRejectDispatch
+    incident: DispatchRejectIncident
+    responder: DispatchRejectResponder

@@ -12,10 +12,11 @@ from app.schemas.common import SuccessResponse
 from app.schemas.dispatch import (
     DispatchAssignmentData,
     DispatchAssignmentRequest,
-    DispatchCommandData,
+    DispatchAcceptData,
     DispatchDetailData,
     DispatchMineData,
     DispatchRejectRequest,
+    DispatchRejectData,
     DispatchStatus,
     DispatchVersionRequest,
 )
@@ -99,7 +100,7 @@ def _command_response(
 
 @router.post(
     "/dispatches/{dispatch_public_id}/accept",
-    response_model=SuccessResponse[DispatchCommandData],
+    response_model=SuccessResponse[DispatchAcceptData],
 )
 def accept_dispatch(
     dispatch_public_id: UUID,
@@ -118,7 +119,7 @@ def accept_dispatch(
 
 @router.post(
     "/dispatches/{dispatch_public_id}/reject",
-    response_model=SuccessResponse[DispatchCommandData],
+    response_model=SuccessResponse[DispatchRejectData],
 )
 def reject_dispatch(
     dispatch_public_id: UUID,

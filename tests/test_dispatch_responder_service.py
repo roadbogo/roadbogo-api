@@ -27,10 +27,15 @@ class ScalarResult:
 
 
 class FakeSession:
-    def __init__(self, values, *, total=0, commit_error=None):
+    def __init__(
+        self, values, *, total=0, commit_error=None,
+        fail_add_model=None, fail_flush_at=None,
+    ):
         self.values = list(values)
         self.total = total
         self.commit_error = commit_error
+        self.fail_add_model = fail_add_model
+        self.fail_flush_at = fail_flush_at
         self.added = []
         self.statements = []
         self.flush_count = self.commit_count = self.rollback_count = 0
@@ -44,10 +49,14 @@ class FakeSession:
         return self.total
 
     def add(self, value):
+        if self.fail_add_model and isinstance(value, self.fail_add_model):
+            raise RuntimeError("add failed")
         self.added.append(value)
 
     def flush(self):
         self.flush_count += 1
+        if self.flush_count == self.fail_flush_at:
+            raise RuntimeError("flush failed")
 
     def commit(self):
         self.commit_count += 1
@@ -144,7 +153,7 @@ def test_accept_updates_dispatch_incident_and_creates_records() -> None:
     actor = _actor()
     incident = _incident()
     dispatch = _dispatch(incident)
-    db = FakeSession([None, dispatch, object(), incident, object()])
+    db = FakeSession([None, dispatch, incident, dispatch, object(), object()])
 
     result = dispatch_command.execute(
         db,
@@ -171,6 +180,11 @@ def test_accept_updates_dispatch_incident_and_creates_records() -> None:
     assert result.data["incident"]["status"] == "DISPATCHED"
     assert "user_id" not in repr([event.payload_json for event in _added(db, EventOutbox)])
     assert db.commit_count == 1
+    assert db.statements[1]._for_update_arg is None
+    assert db.statements[2]._for_update_arg is not None
+    assert "incidents" in str(db.statements[2])
+    assert db.statements[3]._for_update_arg is not None
+    assert "dispatch_requests" in str(db.statements[3])
 
 
 def test_reject_releases_responder_and_keeps_incident_status() -> None:
@@ -178,7 +192,7 @@ def test_reject_releases_responder_and_keeps_incident_status() -> None:
     incident = _incident()
     dispatch = _dispatch(incident)
     profile = SimpleNamespace(duty_status="BUSY")
-    db = FakeSession([None, dispatch, object(), profile, incident])
+    db = FakeSession([None, dispatch, incident, profile, dispatch, object()])
 
     result = dispatch_command.execute(
         db,
@@ -199,6 +213,11 @@ def test_reject_releases_responder_and_keeps_incident_status() -> None:
     assert _added(db, AuditLog)[0].action_code == "DISPATCH.REJECT"
     assert _added(db, EventOutbox)[0].event_type == "DISPATCH.REJECTED"
     assert result.data["responder"]["duty_status"] == "AVAILABLE"
+    assert db.statements[1]._for_update_arg is None
+    assert "incidents" in str(db.statements[2])
+    assert "responder_profiles" in str(db.statements[3])
+    assert "dispatch_requests" in str(db.statements[4])
+    assert all(db.statements[index]._for_update_arg is not None for index in (2, 3, 4))
 
 
 def test_completed_idempotency_replays_without_writes() -> None:
@@ -237,24 +256,33 @@ def test_completed_idempotency_replays_without_writes() -> None:
     ("values", "dispatch", "expected_code"),
     [
         ([None, None], None, "DISPATCH_NOT_FOUND"),
-        ([None, _dispatch()], "version", "DISPATCH_VERSION_CONFLICT"),
-        ([None, _dispatch()], "status", "DISPATCH_INVALID_STATE_TRANSITION"),
-        ([None, _dispatch(), None], "transition", "DISPATCH_INVALID_STATE_TRANSITION"),
+        (None, "version", "DISPATCH_VERSION_CONFLICT"),
+        (None, "status", "DISPATCH_INVALID_STATE_TRANSITION"),
+        (None, "transition", "DISPATCH_INVALID_STATE_TRANSITION"),
     ],
 )
 def test_accept_validation_errors(values, dispatch, expected_code) -> None:
     actor = _actor()
-    target = values[1] if len(values) > 1 else None
-    if dispatch == "version":
-        target.version_no = 1
-    elif dispatch == "status":
-        target.dispatch_status = "ACCEPTED"
+    requested_public_id = str(uuid4())
+    if values is None:
+        incident = _incident()
+        preview = _dispatch(incident)
+        locked = _dispatch(incident)
+        locked.public_id = preview.public_id
+        requested_public_id = preview.public_id
+        if dispatch == "version":
+            locked.version_no = 1
+        elif dispatch == "status":
+            locked.dispatch_status = "ACCEPTED"
+        values = [None, preview, incident, locked]
+        if dispatch == "transition":
+            values.append(None)
 
     with pytest.raises(AppException) as error:
         dispatch_command.execute(
             FakeSession(values),
             command="accept",
-            dispatch_public_id=str(uuid4()),
+            dispatch_public_id=requested_public_id,
             expected_version_no=0,
             rejection_reason=None,
             idempotency_key=str(uuid4()),
@@ -270,7 +298,7 @@ def test_accept_rejects_incident_state_mismatch() -> None:
     incident = _incident()
     incident.incident_status = "DISPATCHED"
     dispatch = _dispatch(incident)
-    db = FakeSession([None, dispatch, object(), incident])
+    db = FakeSession([None, dispatch, incident, dispatch, object()])
 
     with pytest.raises(AppException) as error:
         dispatch_command.execute(
@@ -316,7 +344,7 @@ def test_commit_failure_rolls_back() -> None:
     incident = _incident()
     dispatch = _dispatch(incident)
     db = FakeSession(
-        [None, dispatch, object(), incident, object()],
+        [None, dispatch, incident, dispatch, object(), object()],
         commit_error=RuntimeError("commit failed"),
     )
     with pytest.raises(RuntimeError):
@@ -331,3 +359,85 @@ def test_commit_failure_rolls_back() -> None:
             trace_id=str(uuid4()),
         )
     assert db.rollback_count == 1
+
+
+@pytest.mark.parametrize(
+    "model",
+    [DispatchStatusHistory, IncidentStatusHistory, AuditLog, EventOutbox],
+)
+def test_storage_failure_rolls_back(model) -> None:
+    actor = _actor()
+    incident = _incident()
+    dispatch = _dispatch(incident)
+    db = FakeSession(
+        [None, dispatch, incident, dispatch, object(), object()],
+        fail_add_model=model,
+    )
+
+    with pytest.raises(RuntimeError):
+        dispatch_command.execute(
+            db,
+            command="accept",
+            dispatch_public_id=dispatch.public_id,
+            expected_version_no=0,
+            rejection_reason=None,
+            idempotency_key=str(uuid4()),
+            current_user=actor,
+            trace_id=str(uuid4()),
+        )
+
+    assert db.rollback_count == 1
+
+
+def test_idempotency_completion_flush_failure_rolls_back() -> None:
+    actor = _actor()
+    incident = _incident()
+    dispatch = _dispatch(incident)
+    db = FakeSession(
+        [None, dispatch, incident, dispatch, object(), object()],
+        fail_flush_at=2,
+    )
+
+    with pytest.raises(RuntimeError):
+        dispatch_command.execute(
+            db,
+            command="accept",
+            dispatch_public_id=dispatch.public_id,
+            expected_version_no=0,
+            rejection_reason=None,
+            idempotency_key=str(uuid4()),
+            current_user=actor,
+            trace_id=str(uuid4()),
+        )
+
+    assert db.rollback_count == 1
+
+
+@pytest.mark.parametrize("locked", [None, "different_owner", "different_incident"])
+def test_locked_dispatch_identity_is_revalidated(locked) -> None:
+    actor = _actor()
+    incident = _incident()
+    preview = _dispatch(incident)
+    if locked == "different_owner":
+        locked = _dispatch(incident)
+        locked.public_id = preview.public_id
+        locked.responder_user_id = 99
+    elif locked == "different_incident":
+        locked = _dispatch(incident)
+        locked.public_id = preview.public_id
+        locked.incident_id = 999
+    db = FakeSession([None, preview, incident, locked])
+
+    with pytest.raises(AppException) as error:
+        dispatch_command.execute(
+            db,
+            command="accept",
+            dispatch_public_id=preview.public_id,
+            expected_version_no=0,
+            rejection_reason=None,
+            idempotency_key=str(uuid4()),
+            current_user=actor,
+            trace_id=str(uuid4()),
+        )
+
+    assert error.value.code == "DISPATCH_NOT_FOUND"
