@@ -29,13 +29,14 @@ class ScalarResult:
 class FakeSession:
     def __init__(
         self, values, *, total=0, commit_error=None,
-        fail_add_model=None, fail_flush_at=None,
+        fail_add_model=None, fail_flush_at=None, scalar_values=None,
     ):
         self.values = list(values)
         self.total = total
         self.commit_error = commit_error
         self.fail_add_model = fail_add_model
         self.fail_flush_at = fail_flush_at
+        self.scalar_values = list(scalar_values or [])
         self.added = []
         self.statements = []
         self.flush_count = self.commit_count = self.rollback_count = 0
@@ -46,6 +47,8 @@ class FakeSession:
 
     def scalar(self, statement):
         self.statements.append(statement)
+        if self.scalar_values:
+            return self.scalar_values.pop(0)
         return self.total
 
     def add(self, value):
@@ -153,7 +156,9 @@ def test_accept_updates_dispatch_incident_and_creates_records() -> None:
     actor = _actor()
     incident = _incident()
     dispatch = _dispatch(incident)
-    db = FakeSession([None, dispatch, incident, dispatch, object(), object()])
+    db = FakeSession(
+        [None, incident, dispatch, object(), object()], scalar_values=[incident.incident_id]
+    )
 
     result = dispatch_command.execute(
         db,
@@ -181,6 +186,8 @@ def test_accept_updates_dispatch_incident_and_creates_records() -> None:
     assert "user_id" not in repr([event.payload_json for event in _added(db, EventOutbox)])
     assert db.commit_count == 1
     assert db.statements[1]._for_update_arg is None
+    assert [column.name for column in db.statements[1].selected_columns] == ["incident_id"]
+    assert "SELECT dispatch_requests.incident_id" in str(db.statements[1])
     assert db.statements[2]._for_update_arg is not None
     assert "incidents" in str(db.statements[2])
     assert db.statements[3]._for_update_arg is not None
@@ -192,7 +199,9 @@ def test_reject_releases_responder_and_keeps_incident_status() -> None:
     incident = _incident()
     dispatch = _dispatch(incident)
     profile = SimpleNamespace(duty_status="BUSY")
-    db = FakeSession([None, dispatch, incident, profile, dispatch, object()])
+    db = FakeSession(
+        [None, incident, profile, dispatch, object()], scalar_values=[incident.incident_id]
+    )
 
     result = dispatch_command.execute(
         db,
@@ -255,7 +264,7 @@ def test_completed_idempotency_replays_without_writes() -> None:
 @pytest.mark.parametrize(
     ("values", "dispatch", "expected_code"),
     [
-        ([None, None], None, "DISPATCH_NOT_FOUND"),
+        ([None], None, "DISPATCH_NOT_FOUND"),
         (None, "version", "DISPATCH_VERSION_CONFLICT"),
         (None, "status", "DISPATCH_INVALID_STATE_TRANSITION"),
         (None, "transition", "DISPATCH_INVALID_STATE_TRANSITION"),
@@ -264,23 +273,23 @@ def test_completed_idempotency_replays_without_writes() -> None:
 def test_accept_validation_errors(values, dispatch, expected_code) -> None:
     actor = _actor()
     requested_public_id = str(uuid4())
+    scalar_values = [None]
     if values is None:
         incident = _incident()
-        preview = _dispatch(incident)
         locked = _dispatch(incident)
-        locked.public_id = preview.public_id
-        requested_public_id = preview.public_id
+        requested_public_id = locked.public_id
+        scalar_values = [incident.incident_id]
         if dispatch == "version":
             locked.version_no = 1
         elif dispatch == "status":
             locked.dispatch_status = "ACCEPTED"
-        values = [None, preview, incident, locked]
+        values = [None, incident, locked]
         if dispatch == "transition":
             values.append(None)
 
     with pytest.raises(AppException) as error:
         dispatch_command.execute(
-            FakeSession(values),
+            FakeSession(values, scalar_values=scalar_values),
             command="accept",
             dispatch_public_id=requested_public_id,
             expected_version_no=0,
@@ -298,7 +307,9 @@ def test_accept_rejects_incident_state_mismatch() -> None:
     incident = _incident()
     incident.incident_status = "DISPATCHED"
     dispatch = _dispatch(incident)
-    db = FakeSession([None, dispatch, incident, dispatch, object()])
+    db = FakeSession(
+        [None, incident, dispatch, object()], scalar_values=[incident.incident_id]
+    )
 
     with pytest.raises(AppException) as error:
         dispatch_command.execute(
@@ -344,8 +355,9 @@ def test_commit_failure_rolls_back() -> None:
     incident = _incident()
     dispatch = _dispatch(incident)
     db = FakeSession(
-        [None, dispatch, incident, dispatch, object(), object()],
+        [None, incident, dispatch, object(), object()],
         commit_error=RuntimeError("commit failed"),
+        scalar_values=[incident.incident_id],
     )
     with pytest.raises(RuntimeError):
         dispatch_command.execute(
@@ -370,8 +382,9 @@ def test_storage_failure_rolls_back(model) -> None:
     incident = _incident()
     dispatch = _dispatch(incident)
     db = FakeSession(
-        [None, dispatch, incident, dispatch, object(), object()],
+        [None, incident, dispatch, object(), object()],
         fail_add_model=model,
+        scalar_values=[incident.incident_id],
     )
 
     with pytest.raises(RuntimeError):
@@ -394,8 +407,9 @@ def test_idempotency_completion_flush_failure_rolls_back() -> None:
     incident = _incident()
     dispatch = _dispatch(incident)
     db = FakeSession(
-        [None, dispatch, incident, dispatch, object(), object()],
+        [None, incident, dispatch, object(), object()],
         fail_flush_at=2,
+        scalar_values=[incident.incident_id],
     )
 
     with pytest.raises(RuntimeError):
@@ -426,7 +440,9 @@ def test_locked_dispatch_identity_is_revalidated(locked) -> None:
         locked = _dispatch(incident)
         locked.public_id = preview.public_id
         locked.incident_id = 999
-    db = FakeSession([None, preview, incident, locked])
+    db = FakeSession(
+        [None, incident, locked], scalar_values=[preview.incident_id]
+    )
 
     with pytest.raises(AppException) as error:
         dispatch_command.execute(

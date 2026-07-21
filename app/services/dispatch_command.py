@@ -155,15 +155,14 @@ def execute(
                 raise
             return _replay(concurrent, request_hash)
 
-        preview = db.scalars(
-            select(DispatchRequest).where(
+        preview_incident_id = db.scalar(
+            select(DispatchRequest.incident_id).where(
                 DispatchRequest.public_id == dispatch_public_id,
                 DispatchRequest.responder_user_id == current_user.user.user_id,
             )
-        ).first()
-        if preview is None:
+        )
+        if preview_incident_id is None:
             raise _error(404, "DISPATCH_NOT_FOUND", "출동 요청 정보를 찾을 수 없습니다.")
-        preview_incident_id = preview.incident_id
         incident = db.scalars(
             select(Incident)
             .where(Incident.incident_id == preview_incident_id)
