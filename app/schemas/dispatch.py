@@ -95,3 +95,86 @@ class DispatchIncidentSummary(ReadResponseModel):
 class DispatchAssignmentData(ReadResponseModel):
     dispatch: DispatchData
     incident: DispatchIncidentSummary
+
+
+class DispatchMineIncident(ReadResponseModel):
+    public_id: UUID
+    incident_no: str
+    status: IncidentStatus
+    object_category: str
+    ai_risk_grade: str
+    cctv_name: str
+    road_name: str
+    road_section_name: str
+    latitude: float
+    longitude: float
+
+
+class DispatchMineItem(ReadResponseModel):
+    public_id: UUID
+    attempt_no: int
+    status: DispatchStatus
+    request_message: str | None
+    requested_at: UtcDateTimeString
+    accepted_at: UtcDateTimeString | None
+    version_no: int
+    incident: DispatchMineIncident
+    assigned_by: DispatchUserSummary
+
+
+class DispatchMineData(ReadResponseModel):
+    items: list[DispatchMineItem]
+    pagination: PaginationData
+
+
+class DispatchDetailData(DispatchMineItem):
+    rejection_reason: str | None
+    departed_at: UtcDateTimeString | None
+    en_route_at: UtcDateTimeString | None
+    arrived_at: UtcDateTimeString | None
+    action_started_at: UtcDateTimeString | None
+    action_completed_at: UtcDateTimeString | None
+    cancelled_at: UtcDateTimeString | None
+    previous_dispatch_public_id: UUID | None
+
+
+class DispatchVersionRequest(ReadResponseModel):
+    expected_version_no: int = Field(ge=0)
+
+
+class DispatchRejectRequest(DispatchVersionRequest):
+    rejection_reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("rejection_reason", mode="before")
+    @classmethod
+    def normalize_reason(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class DispatchCommandDispatch(ReadResponseModel):
+    public_id: UUID
+    previous_status: DispatchStatus
+    status: DispatchStatus
+    version_no: int
+    accepted_at: UtcDateTimeString | None = None
+    rejection_reason: str | None = None
+
+
+class DispatchCommandIncident(ReadResponseModel):
+    public_id: UUID
+    status: IncidentStatus
+    version_no: int
+    previous_status: IncidentStatus | None = None
+
+
+class DispatchCommandResponder(ReadResponseModel):
+    public_id: UUID
+    duty_status: DutyStatus
+
+
+class DispatchCommandData(ReadResponseModel):
+    dispatch: DispatchCommandDispatch
+    incident: DispatchCommandIncident
+    responder: DispatchCommandResponder | None = None
