@@ -83,7 +83,7 @@ def _responder(*, duty="AVAILABLE", enabled=1, status="ACTIVE", deleted=None):
 def _execute(*, previous=None):
     incident = _incident()
     responder, profile = _responder()
-    db = FakeSession([None, incident, responder, None, None, previous])
+    db = FakeSession([None, incident, responder, profile, 1, None, None, previous])
     result = dispatch_assignment.assign_dispatch(
         db, incident_public_id=incident.public_id,
         responder_public_id=responder.public_id, request_message="요청",
@@ -104,7 +104,7 @@ def test_assignment_success_creates_contract_records() -> None:
     assert dispatch.previous_dispatch_request_id is None
     assert incident.incident_status == "DISPATCH_REQUESTED"
     assert incident.version_no == 5
-    assert profile.duty_status == "AVAILABLE"
+    assert profile.duty_status == "BUSY"
     history = _added(db, DispatchStatusHistory)[0]
     assert history.from_status is None and history.to_status == "REQUESTED"
     assert history.metadata_json["responder_public_id"] == responder.public_id
@@ -114,7 +114,9 @@ def test_assignment_success_creates_contract_records() -> None:
     assert outbox.aggregate_type == "DISPATCH"
     assert outbox.payload_json["resource"]["resource_type"] == "DISPATCH"
     assert "user_id" not in repr(outbox.payload_json)
-    assert _added(db, IdempotencyKey)[0].processing_status == "COMPLETED"
+    idempotency = _added(db, IdempotencyKey)[0]
+    assert idempotency.processing_status == "COMPLETED"
+    assert idempotency.response_code == 201
     assert result.data["dispatch"]["version_no"] == 0
     assert result.data["incident"]["version_no"] == 5
     assert db.commit_count == 1
@@ -151,17 +153,24 @@ def test_incident_validation(values, expected) -> None:
 
 
 @pytest.mark.parametrize(
-    ("responder", "code"),
+    ("responder", "profile", "active_role", "code"),
     [
-        (None, "DISPATCH_RESPONDER_NOT_FOUND"),
-        (_responder(duty="BUSY")[0], "DISPATCH_RESPONDER_UNAVAILABLE"),
-        (_responder(enabled=0)[0], "DISPATCH_RESPONDER_UNAVAILABLE"),
-        (_responder(status="INACTIVE")[0], "DISPATCH_RESPONDER_UNAVAILABLE"),
+        (None, None, None, "DISPATCH_RESPONDER_NOT_FOUND"),
+        (*_responder(duty="BUSY"), 1, "DISPATCH_RESPONDER_UNAVAILABLE"),
+        (*_responder(duty="OFF_DUTY"), 1, "DISPATCH_RESPONDER_UNAVAILABLE"),
+        (*_responder(duty="UNAVAILABLE"), 1, "DISPATCH_RESPONDER_UNAVAILABLE"),
+        (*_responder(enabled=0), 1, "DISPATCH_RESPONDER_UNAVAILABLE"),
+        (*_responder(status="INACTIVE"), 1, "DISPATCH_RESPONDER_UNAVAILABLE"),
+        (_responder()[0], None, 1, "DISPATCH_RESPONDER_NOT_FOUND"),
+        (*_responder(), None, "DISPATCH_RESPONDER_NOT_FOUND"),
     ],
 )
-def test_responder_validation(responder, code) -> None:
+def test_responder_validation(responder, profile, active_role, code) -> None:
     incident = _incident()
-    db = FakeSession([None, incident, responder])
+    values = [None, incident, responder]
+    if responder is not None:
+        values.extend([profile, active_role])
+    db = FakeSession(values)
     with pytest.raises(AppException) as error:
         dispatch_assignment.assign_dispatch(
             db, incident_public_id=incident.public_id,
@@ -172,12 +181,27 @@ def test_responder_validation(responder, code) -> None:
     assert error.value.code == code
 
 
+def test_responder_user_and_profile_are_locked_separately() -> None:
+    responder, profile = _responder()
+    db = FakeSession([responder, profile, 1])
+
+    assert dispatch_assignment._lock_responder(db, responder.public_id) == (
+        responder,
+        profile,
+    )
+    assert db.statements[0]._for_update_arg is not None
+    assert db.statements[1]._for_update_arg is not None
+    assert db.statements[2]._for_update_arg is None
+    assert "responder_profiles" in str(db.statements[1])
+
+
 def test_active_incident_and_responder_conflicts() -> None:
     incident = _incident()
     responder, _ = _responder()
+    profile = responder.responder_profiles[0]
     for values, code in (
-        ([None, incident, responder, object()], "DISPATCH_ALREADY_ASSIGNED"),
-        ([None, incident, responder, None, object()], "DISPATCH_RESPONDER_BUSY"),
+        ([None, incident, responder, profile, 1, object()], "DISPATCH_ALREADY_ASSIGNED"),
+        ([None, incident, responder, profile, 1, None, object()], "DISPATCH_RESPONDER_BUSY"),
     ):
         with pytest.raises(AppException) as error:
             dispatch_assignment.assign_dispatch(
@@ -223,8 +247,11 @@ def test_completed_idempotency_replays() -> None:
 @pytest.mark.parametrize("model", [DispatchStatusHistory, AuditLog, EventOutbox])
 def test_storage_failure_rolls_back(model) -> None:
     incident = _incident()
-    responder, _ = _responder()
-    db = FakeSession([None, incident, responder, None, None, None], fail_add_model=model)
+    responder, profile = _responder()
+    db = FakeSession(
+        [None, incident, responder, profile, 1, None, None, None],
+        fail_add_model=model,
+    )
     with pytest.raises(RuntimeError):
         dispatch_assignment.assign_dispatch(
             db, incident_public_id=incident.public_id, responder_public_id=responder.public_id,
@@ -234,10 +261,34 @@ def test_storage_failure_rolls_back(model) -> None:
     assert db.rollback_count == 1
 
 
+def test_idempotency_completion_failure_rolls_back() -> None:
+    incident = _incident()
+    responder, profile = _responder()
+    db = FakeSession(
+        [None, incident, responder, profile, 1, None, None, None],
+        fail_flush_at=3,
+    )
+    with pytest.raises(RuntimeError):
+        dispatch_assignment.assign_dispatch(
+            db,
+            incident_public_id=incident.public_id,
+            responder_public_id=responder.public_id,
+            request_message=None,
+            expected_version_no=4,
+            idempotency_key=str(uuid4()),
+            current_user=_actor(),
+            trace_id=str(uuid4()),
+        )
+    assert db.rollback_count == 1
+
+
 def test_commit_failure_rolls_back() -> None:
     incident = _incident()
-    responder, _ = _responder()
-    db = FakeSession([None, incident, responder, None, None, None], commit_error=RuntimeError("commit failed"))
+    responder, profile = _responder()
+    db = FakeSession(
+        [None, incident, responder, profile, 1, None, None, None],
+        commit_error=RuntimeError("commit failed"),
+    )
     with pytest.raises(RuntimeError):
         dispatch_assignment.assign_dispatch(
             db, incident_public_id=incident.public_id, responder_public_id=responder.public_id,

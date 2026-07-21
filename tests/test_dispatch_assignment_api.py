@@ -69,12 +69,17 @@ def test_blank_message_is_normalized_and_success_schema(monkeypatch) -> None:
     app.dependency_overrides[get_db] = lambda: object()
     app.dependency_overrides[get_current_user] = lambda: _user("DISPATCH.ASSIGN")
     try:
-        response = _post(TestClient(app), {
+        client = TestClient(app)
+        body = {
             "responder_public_id": str(uuid4()), "request_message": "   ", "expected_version_no": 4
-        }, str(uuid4()))
+        }
+        key = str(uuid4())
+        response = _post(client, body, key)
+        replay = _post(client, body, key)
     finally:
         app.dependency_overrides.clear()
-    assert response.status_code == 200
+    assert response.status_code == 201
+    assert replay.status_code == 201
     assert captured["request_message"] is None
     assert "user_id" not in response.text
 
@@ -85,6 +90,6 @@ def test_dispatch_openapi_is_concrete() -> None:
     assert next(p for p in operation["parameters"] if p["name"] == "Idempotency-Key")["required"] is True
     request = schema["components"]["schemas"]["DispatchAssignmentRequest"]
     assert request["properties"]["expected_version_no"]["minimum"] == 0
-    response_ref = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+    response_ref = operation["responses"]["201"]["content"]["application/json"]["schema"]["$ref"]
     envelope = schema["components"]["schemas"][response_ref.rsplit("/", 1)[1]]
     assert envelope["properties"]["data"]["anyOf"][0]["$ref"].endswith("DispatchAssignmentData")

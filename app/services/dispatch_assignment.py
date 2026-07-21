@@ -6,11 +6,11 @@ from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppException
 from app.dependencies.auth import CurrentUser
-from app.models.auth import ResponderProfile, User, UserRole
+from app.models.auth import ResponderProfile, Role, User, UserRole
 from app.models.dispatch import DispatchRequest, DispatchStatusHistory
 from app.models.incident import Incident
 from app.models.notification import AuditLog, EventOutbox, IdempotencyKey
@@ -88,10 +88,6 @@ def _lock_responder(db: Session, public_id: str) -> tuple[User, ResponderProfile
     user = db.scalars(
         select(User)
         .where(User.public_id == public_id)
-        .options(
-            selectinload(User.responder_profiles),
-            selectinload(User.user_roles_users).joinedload(UserRole.role),
-        )
         .with_for_update()
     ).first()
     if user is None:
@@ -99,12 +95,21 @@ def _lock_responder(db: Session, public_id: str) -> tuple[User, ResponderProfile
             404, "DISPATCH_RESPONDER_NOT_FOUND",
             "출동 담당자 정보를 찾을 수 없습니다."
         )
-    active_responder_role = any(
-        user_role.role.role_code == "RESPONDER" and bool(user_role.role.is_active)
-        for user_role in user.user_roles_users
-    )
-    profile = user.responder_profiles[0] if user.responder_profiles else None
-    if not active_responder_role or profile is None:
+    profile = db.scalars(
+        select(ResponderProfile)
+        .where(ResponderProfile.user_id == user.user_id)
+        .with_for_update()
+    ).first()
+    active_responder_role = db.scalars(
+        select(UserRole.user_role_id)
+        .join(Role, Role.role_id == UserRole.role_id)
+        .where(
+            UserRole.user_id == user.user_id,
+            Role.role_code == "RESPONDER",
+            Role.is_active.is_(True),
+        )
+    ).first()
+    if active_responder_role is None or profile is None:
         raise _error(
             404, "DISPATCH_RESPONDER_NOT_FOUND",
             "출동 담당자 정보를 찾을 수 없습니다."
@@ -292,6 +297,8 @@ def assign_dispatch(
                 raise conflict from exc
             raise
 
+        profile.duty_status = "BUSY"
+
         db.add(
             DispatchStatusHistory(
                 public_id=str(uuid4()),
@@ -391,7 +398,7 @@ def assign_dispatch(
         idempotency.processing_status = "COMPLETED"
         idempotency.resource_type = "DISPATCH"
         idempotency.resource_public_id = dispatch.public_id
-        idempotency.response_code = 200
+        idempotency.response_code = 201
         idempotency.response_snapshot_json = {
             "data": data,
             "message": SUCCESS_MESSAGE,

@@ -21,6 +21,7 @@ DispatchPermission = Annotated[
 @router.post(
     "/incidents/{incident_public_id}/dispatches",
     response_model=SuccessResponse[DispatchAssignmentData],
+    status_code=201,
 )
 def assign_dispatch(
     incident_public_id: UUID,
