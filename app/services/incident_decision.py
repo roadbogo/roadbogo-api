@@ -194,19 +194,28 @@ def _event_payload(
             "resource_type": "INCIDENT",
             "resource_public_id": incident.public_id,
         },
-        "incident_no": incident.incident_no,
-        "previous_status": previous_status,
-        "status": incident.incident_status,
         "version_no": incident.version_no,
-        "decision": {
-            "public_id": decision.public_id,
-            "decision_type": decision.decision_type,
-            "decision_reason": decision.decision_reason,
-            "decided_by": {
+        "data": {
+            "incident_no": incident.incident_no,
+            "previous_status": previous_status,
+            "status": incident.incident_status,
+            "decision": {
+                "public_id": decision.public_id,
+                "decision_type": decision.decision_type,
+                "decision_reason": decision.decision_reason,
+                "decided_by": {
+                    "public_id": current_user.user.public_id,
+                    "user_name": current_user.user.user_name,
+                },
+                "decided_at": utc_z(now),
+            },
+            "changed_by": {
                 "public_id": current_user.user.public_id,
                 "user_name": current_user.user.user_name,
             },
+            "changed_at": utc_z(now),
         },
+        "notification": None,
         "trace_id": trace_id,
     }
 

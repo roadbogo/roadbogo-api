@@ -113,6 +113,46 @@ def _added(db, model):
     return [value for value in db.added if isinstance(value, model)]
 
 
+def _assert_common_event_envelope(payload, event_type) -> None:
+    assert set(payload) == {
+        "event_id",
+        "event_type",
+        "occurred_at",
+        "resource",
+        "version_no",
+        "data",
+        "notification",
+        "trace_id",
+    }
+    assert payload["event_type"] == event_type
+    assert payload["notification"] is None
+    assert not ({"incident_no", "previous_status", "status", "decision"} & set(payload))
+    assert set(payload["data"]) == {
+        "incident_no",
+        "previous_status",
+        "status",
+        "decision",
+        "changed_by",
+        "changed_at",
+    }
+    assert set(payload["data"]["decision"]) == {
+        "public_id",
+        "decision_type",
+        "decision_reason",
+        "decided_by",
+        "decided_at",
+    }
+    serialized = repr(payload)
+    for internal_id in (
+        "incident_id",
+        "user_id",
+        "actor_user_id",
+        "incident_decision_id",
+        "decided_by_user_id",
+    ):
+        assert internal_id not in serialized
+
+
 @pytest.mark.parametrize(
     ("decision_type", "status", "reason_code", "closed"),
     [
@@ -156,7 +196,11 @@ def test_needs_review_keeps_status_without_history() -> None:
     assert incident.closed_at is None
     assert _added(db, IncidentStatusHistory) == []
     assert len(_added(db, IncidentDecision)) == 1
-    assert _added(db, EventOutbox)[0].event_type == "INCIDENT.DECISION_RECORDED"
+    outbox = _added(db, EventOutbox)[0]
+    assert outbox.event_type == "INCIDENT.DECISION_RECORDED"
+    _assert_common_event_envelope(
+        outbox.payload_json, "INCIDENT.DECISION_RECORDED"
+    )
     assert result.data["status"] == "UNDER_REVIEW"
 
 
@@ -181,10 +225,9 @@ def test_audit_and_outbox_expose_only_public_identifiers() -> None:
     outbox = _added(db, EventOutbox)[0]
     assert outbox.aggregate_type == "INCIDENT"
     assert outbox.publish_status == "PENDING"
-    payload = repr(outbox.payload_json)
-    assert "incident_id" not in payload
-    assert "user_id" not in payload
-    assert "actor_user_id" not in payload
+    _assert_common_event_envelope(
+        outbox.payload_json, "INCIDENT.STATUS_CHANGED"
+    )
 
 
 def test_missing_incident() -> None:
