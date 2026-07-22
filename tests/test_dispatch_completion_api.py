@@ -2,8 +2,10 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+import pytest
 
 from app.core.database import get_db
+from app.core.exceptions import AppException
 from app.dependencies.auth import get_current_user
 from app.main import app
 from app.services.incident_command import CommandResult
@@ -43,6 +45,26 @@ def test_completion_api_auth_validation_success_and_openapi(monkeypatch) -> None
             path,
             headers={"Idempotency-Key": str(uuid4())},
             json=body | {"action_type": "   "},
+        ),
+        client.post(
+            path,
+            headers={"Idempotency-Key": str(uuid4())},
+            json=body | {"action_detail": "   "},
+        ),
+        client.post(
+            path,
+            headers={"Idempotency-Key": str(uuid4())},
+            json=body | {"action_type": "A" * 61},
+        ),
+        client.post(
+            path,
+            headers={"Idempotency-Key": str(uuid4())},
+            json=body | {"action_detail": "a" * 5001},
+        ),
+        client.post(
+            path,
+            headers={"Idempotency-Key": str(uuid4())},
+            json={"action_type": "DEBRIS_REMOVAL", "action_detail": "낙하물을 제거했습니다."},
         ),
         client.post(
             path,
@@ -102,3 +124,46 @@ def test_completion_api_auth_validation_success_and_openapi(monkeypatch) -> None
     )
     response_ref = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
     assert "DispatchCompletionData" in response_ref
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code"),
+    [
+        (404, "DISPATCH_NOT_FOUND"),
+        (409, "DISPATCH_VERSION_CONFLICT"),
+        (409, "DISPATCH_INVALID_STATE_TRANSITION"),
+        (409, "INCIDENT_INVALID_STATE_TRANSITION"),
+        (409, "DISPATCH_RESPONDER_STATUS_CONFLICT"),
+        (409, "DISPATCH_ACTION_REPORT_ALREADY_EXISTS"),
+        (409, "DISPATCH_IDEMPOTENCY_CONFLICT"),
+    ],
+)
+def test_completion_api_preserves_service_error_envelope(monkeypatch, status_code, code) -> None:
+    dispatch_id = str(uuid4())
+    path = f"/api/v1/dispatches/{dispatch_id}/complete-action"
+
+    def raise_error(db, **kwargs):
+        raise AppException(status_code, code, "완료 처리 오류")
+
+    monkeypatch.setattr("app.api.v1.dispatches.dispatch_completion.execute", raise_error)
+    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_current_user] = lambda: user("DISPATCH.UPDATE_OWN")
+    client = TestClient(app)
+    try:
+        response = client.post(
+            path,
+            headers={"Idempotency-Key": str(uuid4())},
+            json={
+                "expected_version_no": 4,
+                "action_type": "DEBRIS_REMOVAL",
+                "action_detail": "낙하물을 제거했습니다.",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == status_code
+    assert response.json()["success"] is False
+    assert response.json()["error"]["code"] == code
+    assert response.json()["trace_id"]
+    assert "user_id" not in response.text
+    assert "action_detail" not in response.text

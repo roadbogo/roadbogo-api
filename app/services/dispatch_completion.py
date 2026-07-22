@@ -63,7 +63,11 @@ def _replay(record, request_hash: str) -> CommandResult:
     snapshot = record.response_snapshot_json
     if not isinstance(snapshot, dict):
         raise _error(409, "DISPATCH_IDEMPOTENCY_CONFLICT", "처리 결과를 재사용할 수 없습니다.")
-    return CommandResult(snapshot["data"], snapshot["message"])
+    data = snapshot.get("data")
+    message = snapshot.get("message")
+    if not isinstance(data, dict) or not isinstance(message, str) or not message.strip():
+        raise _error(409, "DISPATCH_IDEMPOTENCY_CONFLICT", "처리 결과를 재사용할 수 없습니다.")
+    return CommandResult(data, message)
 
 
 def _envelope(event_type, resource_type, resource_id, version, data, now, trace_id):
