@@ -33,6 +33,23 @@ class Settings(BaseSettings):
         validation_alias="INTERNAL_API_V1_PREFIX",
     )
 
+    ai_server_base_url: str | None = Field(
+        default=None,
+        validation_alias="AI_SERVER_BASE_URL",
+    )
+    ai_server_internal_api_v1_prefix: str = Field(
+        default="/api/internal/v1",
+        validation_alias="AI_SERVER_INTERNAL_API_V1_PREFIX",
+    )
+    ai_internal_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="AI_INTERNAL_API_KEY",
+    )
+    ai_inference_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias="AI_INFERENCE_TIMEOUT_SECONDS",
+    )
+
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         validation_alias="CORS_ORIGINS",
@@ -139,6 +156,36 @@ class Settings(BaseSettings):
     smtp_password: SecretStr | None = Field(default=None, validation_alias="SMTP_PASSWORD")
     smtp_from_email: str | None = Field(default=None, validation_alias="SMTP_FROM_EMAIL")
     smtp_use_tls: bool = Field(default=True, validation_alias="SMTP_USE_TLS")
+
+    @field_validator("ai_server_base_url", mode="before")
+    @classmethod
+    def normalize_ai_server_base_url(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().rstrip("/")
+        return normalized or None
+
+    @field_validator("ai_internal_api_key", mode="before")
+    @classmethod
+    def normalize_ai_internal_api_key(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("ai_server_internal_api_v1_prefix")
+    @classmethod
+    def validate_ai_server_internal_api_v1_prefix(cls, value: str) -> str:
+        normalized = "/" + value.strip("/")
+        if normalized == "/":
+            raise ValueError("AI_SERVER_INTERNAL_API_V1_PREFIX cannot be empty.")
+        return normalized
+
+    @field_validator("ai_inference_timeout_seconds")
+    @classmethod
+    def validate_ai_inference_timeout_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("AI_INFERENCE_TIMEOUT_SECONDS must be greater than zero.")
+        return value
 
     @field_validator("cors_origins", mode="before")
     @classmethod
