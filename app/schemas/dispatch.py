@@ -215,3 +215,49 @@ class DispatchProgressIncident(ReadResponseModel):
 class DispatchProgressData(ReadResponseModel):
     dispatch: DispatchProgressDispatch
     incident: DispatchProgressIncident
+
+
+class DispatchCompleteActionRequest(ReadResponseModel):
+    expected_version_no: int = Field(ge=0)
+    action_type: str = Field(min_length=1, max_length=60)
+    action_detail: str = Field(min_length=1, max_length=5000)
+
+    @field_validator("action_type", "action_detail", mode="before")
+    @classmethod
+    def normalize_action_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class DispatchCompletionDispatch(ReadResponseModel):
+    public_id: UUID
+    previous_status: DispatchStatus
+    status: DispatchStatus
+    action_completed_at: UtcDateTimeString
+    version_no: int
+
+
+class DispatchCompletionIncident(ReadResponseModel):
+    public_id: UUID
+    previous_status: IncidentStatus
+    status: IncidentStatus
+    version_no: int
+
+
+class DispatchCompletionResponder(ReadResponseModel):
+    public_id: UUID
+    duty_status: DutyStatus
+
+
+class DispatchCompletionReport(ReadResponseModel):
+    public_id: UUID
+    action_type: str
+    action_detail: str
+    action_started_at: UtcDateTimeString
+    action_completed_at: UtcDateTimeString
+
+
+class DispatchCompletionData(ReadResponseModel):
+    dispatch: DispatchCompletionDispatch
+    incident: DispatchCompletionIncident
+    responder: DispatchCompletionResponder
+    report: DispatchCompletionReport
