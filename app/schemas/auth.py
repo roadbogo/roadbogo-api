@@ -136,3 +136,7 @@ class UpdateMeRequest(RequestModel):
         if "user_name" in fields_set and self.user_name is None:
             raise ValueError("user_name cannot be null.")
         return self
+
+
+class WithdrawMeRequest(RequestModel):
+    current_password: str = Field(min_length=1, max_length=128)

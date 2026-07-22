@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
 import re
+import secrets
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -23,6 +24,7 @@ from app.core.security import (
     verify_password_or_dummy,
 )
 from app.models.auth import Permission, Role, RolePermission, User, UserRole, UserSession
+from app.models.notification import AuditLog
 from app.schemas.auth import (
     AuthTokenData,
     LoginRequest,
@@ -33,6 +35,7 @@ from app.schemas.auth import (
     RegisterRequest,
     UpdateMeRequest,
     UserSummary,
+    WithdrawMeRequest,
 )
 from app.services import mail
 
@@ -278,6 +281,110 @@ def update_current_user_profile(
         raise
 
     return user_summary
+
+
+def withdraw_current_user(
+    db: Session,
+    current_user,
+    request: WithdrawMeRequest,
+    *,
+    trace_id: str,
+) -> None:
+    user = None
+    previous_values = None
+    expected_user_id = current_user.user.user_id
+    expected_public_id = current_user.user.public_id
+    try:
+        user = db.scalars(
+            select(User)
+            .where(
+                User.user_id == expected_user_id,
+                User.public_id == expected_public_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).first()
+        if (
+            user is None
+            or user.user_id != expected_user_id
+            or user.public_id != expected_public_id
+            or user.account_status != ACTIVE
+            or user.deleted_at is not None
+        ):
+            raise account_unavailable()
+
+        active_roles = set(
+            db.scalars(
+                select(Role.role_code)
+                .select_from(UserRole)
+                .join(Role, Role.role_id == UserRole.role_id)
+                .where(UserRole.user_id == user.user_id, Role.is_active == 1)
+            ).all()
+        )
+        if active_roles != {GENERAL_USER}:
+            raise auth_error(
+                403,
+                "AUTH_WITHDRAWAL_NOT_ALLOWED",
+                "운영 계정은 본인 회원탈퇴를 이용할 수 없습니다.",
+            )
+        if not verify_password_or_dummy(request.current_password, user.password_hash):
+            raise auth_error(
+                401,
+                "AUTH_CURRENT_PASSWORD_INVALID",
+                "현재 비밀번호가 일치하지 않습니다.",
+            )
+
+        previous_values = {
+            "account_status": user.account_status,
+            "deactivated_at": user.deactivated_at,
+            "deactivated_by_user_id": user.deactivated_by_user_id,
+            "deleted_at": user.deleted_at,
+            "email": user.email,
+            "user_name": user.user_name,
+            "phone_encrypted": user.phone_encrypted,
+            "password_hash": user.password_hash,
+            "password_reset_token_hash": user.password_reset_token_hash,
+            "password_reset_token_expires_at": user.password_reset_token_expires_at,
+        }
+        now = utc_now_naive()
+        user.account_status = "INACTIVE"
+        user.deactivated_at = now
+        user.deactivated_by_user_id = user.user_id
+        user.deleted_at = now
+        user.email = f"withdrawn+{user.public_id}@roadbogo.invalid"
+        user.user_name = "탈퇴한 사용자"
+        user.phone_encrypted = None
+        user.password_hash = hash_password(secrets.token_urlsafe(32))
+        user.password_reset_token_hash = None
+        user.password_reset_token_expires_at = None
+
+        db.execute(
+            update(UserSession)
+            .where(UserSession.user_id == user.user_id, UserSession.revoked_at.is_(None))
+            .values(revoked_at=now, revoke_reason="ACCOUNT_WITHDRAWAL")
+        )
+        db.add(
+            AuditLog(
+                public_id=str(uuid4()),
+                actor_type="USER",
+                actor_user_id=user.user_id,
+                action_code="AUTH.ACCOUNT_WITHDRAW",
+                resource_type="USER",
+                resource_public_id=user.public_id,
+                result_status="SUCCESS",
+                before_json={"account_status": "ACTIVE", "deleted": False},
+                after_json={"account_status": "INACTIVE", "deleted": True},
+                trace_id=trace_id,
+            )
+        )
+        db.flush()
+        db.commit()
+    except Exception:
+        db.rollback()
+        if user is not None and previous_values is not None:
+            for field, value in previous_values.items():
+                setattr(user, field, value)
+        raise
 
 
 def issue_auth_tokens(

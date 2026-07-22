@@ -19,6 +19,7 @@ from app.schemas.auth import (
     RegisterData,
     RegisterRequest,
     UpdateMeRequest,
+    WithdrawMeRequest,
 )
 from app.schemas.common import SuccessResponse
 from app.services import auth as auth_service
@@ -145,6 +146,28 @@ def update_me(
     return success_response(
         data={"user": user.model_dump()},
         message="본인 정보가 수정되었습니다.",
+        trace_id=request.state.trace_id,
+    )
+
+
+@router.post("/me/withdraw", response_model=SuccessResponse[None])
+def withdraw_me(
+    request: Request,
+    response: Response,
+    payload: WithdrawMeRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    auth_service.withdraw_current_user(
+        db,
+        current_user,
+        payload,
+        trace_id=request.state.trace_id,
+    )
+    _delete_refresh_cookie(response)
+    return success_response(
+        data=None,
+        message="회원 탈퇴가 완료되었습니다.",
         trace_id=request.state.trace_id,
     )
 
