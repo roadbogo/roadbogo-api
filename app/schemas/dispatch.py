@@ -196,3 +196,22 @@ class DispatchRejectData(ReadResponseModel):
     dispatch: DispatchRejectDispatch
     incident: DispatchRejectIncident
     responder: DispatchRejectResponder
+
+
+class DispatchProgressDispatch(ReadResponseModel):
+    public_id: UUID
+    previous_status: DispatchStatus
+    status: DispatchStatus
+    occurred_at: UtcDateTimeString
+    version_no: int
+
+
+class DispatchProgressIncident(ReadResponseModel):
+    public_id: UUID
+    status: IncidentStatus
+    version_no: int
+
+
+class DispatchProgressData(ReadResponseModel):
+    dispatch: DispatchProgressDispatch
+    incident: DispatchProgressIncident
