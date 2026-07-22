@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, cctvs, dispatches, health, incidents, responders
+from app.api.v1 import action_files, auth, cctvs, dispatches, health, incidents, responders
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
@@ -9,3 +9,4 @@ api_router.include_router(incidents.router)
 api_router.include_router(cctvs.router)
 api_router.include_router(responders.router)
 api_router.include_router(dispatches.router)
+api_router.include_router(action_files.router)
