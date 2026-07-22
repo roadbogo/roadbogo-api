@@ -113,9 +113,22 @@ def execute(
                 "해당 사건의 담당 관제자가 아닙니다.",
             )
         if incident.version_no != expected_version_no:
-            raise _error(409, "INCIDENT_VERSION_CONFLICT", "사건 정보가 변경되었습니다.")
+            raise _error(
+                409,
+                "INCIDENT_VERSION_CONFLICT",
+                "사건 정보가 변경되었습니다. 최신 정보를 다시 확인해 주세요.",
+                {
+                    "requested_version_no": expected_version_no,
+                    "current_version_no": incident.version_no,
+                },
+            )
         if incident.incident_status != "ACTION_COMPLETED" or incident.closed_at is not None:
-            raise _error(409, "INCIDENT_INVALID_STATE_TRANSITION", "사건 상태 전이를 수행할 수 없습니다.")
+            raise _error(
+                409,
+                "INCIDENT_INVALID_STATE_TRANSITION",
+                "사건 상태 전이를 수행할 수 없습니다.",
+                {"current_status": incident.incident_status, "requested_status": "CLOSED"},
+            )
         transition = db.scalars(select(IncidentStateTransition).where(
             IncidentStateTransition.from_status == "ACTION_COMPLETED",
             IncidentStateTransition.to_status == "CLOSED",
@@ -123,7 +136,12 @@ def execute(
             IncidentStateTransition.is_active == 1,
         )).first()
         if transition is None:
-            raise _error(409, "INCIDENT_INVALID_STATE_TRANSITION", "사건 상태 전이를 수행할 수 없습니다.")
+            raise _error(
+                409,
+                "INCIDENT_INVALID_STATE_TRANSITION",
+                "사건 상태 전이를 수행할 수 없습니다.",
+                {"current_status": incident.incident_status, "requested_status": "CLOSED"},
+            )
         if (
             dispatch is None or dispatch.incident_id != incident.incident_id
             or dispatch.dispatch_status != "ACTION_COMPLETED"

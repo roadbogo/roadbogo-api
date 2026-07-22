@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import AppException
 from app.models.incident import IncidentStatusHistory
@@ -19,10 +20,15 @@ class Result:
 
 
 class FakeDb:
-    def __init__(self, values, *, fail_model=None, commit_error=None):
+    def __init__(
+        self, values, *, fail_model=None, commit_error=None,
+        fail_flush_at=None, integrity_flush_at=None,
+    ):
         self.values = list(values)
         self.fail_model = fail_model
         self.commit_error = commit_error
+        self.fail_flush_at = fail_flush_at
+        self.integrity_flush_at = integrity_flush_at
         self.statements = []
         self.added = []
         self.flush_count = self.commit_count = self.rollback_count = 0
@@ -38,6 +44,10 @@ class FakeDb:
 
     def flush(self):
         self.flush_count += 1
+        if self.flush_count == self.integrity_flush_at:
+            raise IntegrityError("insert", {}, RuntimeError("duplicate"))
+        if self.flush_count == self.fail_flush_at:
+            raise RuntimeError("flush failed")
 
     def commit(self):
         self.commit_count += 1
@@ -157,6 +167,34 @@ def test_close_validation_errors(mutate, code) -> None:
     assert db.rollback_count == 1 and db.commit_count == 0
 
 
+def test_version_conflict_contract() -> None:
+    incident, dispatch, report = objects()
+    incident.version_no = 11
+    db = FakeDb([None, incident, dispatch, report])
+    with pytest.raises(AppException) as exc:
+        execute(db, incident)
+    assert exc.value.status_code == 409
+    assert exc.value.code == "INCIDENT_VERSION_CONFLICT"
+    assert exc.value.message == "사건 정보가 변경되었습니다. 최신 정보를 다시 확인해 주세요."
+    assert exc.value.details == {"requested_version_no": 10, "current_version_no": 11}
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_state_transition_error_details(closed) -> None:
+    incident, dispatch, report = objects()
+    if closed:
+        incident.closed_at = datetime(2026, 7, 22)
+    else:
+        incident.incident_status = "ON_SCENE"
+    db = FakeDb([None, incident, dispatch, report])
+    with pytest.raises(AppException) as exc:
+        execute(db, incident)
+    assert exc.value.details == {
+        "current_status": incident.incident_status,
+        "requested_status": "CLOSED",
+    }
+
+
 @pytest.mark.parametrize("missing", ["incident", "dispatch", "report", "transition"])
 def test_close_missing_dependencies(missing) -> None:
     incident, dispatch, report = objects()
@@ -196,6 +234,17 @@ def test_commit_failure_restores_incident() -> None:
     assert db.rollback_count == 1 and db.commit_count == 1
 
 
+def test_final_snapshot_flush_failure_restores_incident() -> None:
+    incident, dispatch, report = objects()
+    db = FakeDb([None, incident, dispatch, report, object()], fail_flush_at=2)
+    with pytest.raises(RuntimeError):
+        execute(db, incident)
+    assert (incident.incident_status, incident.version_no, incident.closed_at) == (
+        "ACTION_COMPLETED", 10, None
+    )
+    assert db.rollback_count == 1 and db.commit_count == 0
+
+
 @pytest.mark.parametrize("snapshot", [None, [], {}, {"data": {}}, {"message": "ok"}, {"data": [], "message": "ok"}, {"data": {}, "message": " "}])
 def test_invalid_completed_snapshot_conflicts(snapshot) -> None:
     record = SimpleNamespace(
@@ -222,3 +271,40 @@ def test_completed_snapshot_replays_without_commit() -> None:
     result = execute(db, incident, user)
     assert result.data == {"status": "CLOSED"}
     assert db.commit_count == 0
+
+
+@pytest.mark.parametrize("status", ["PROCESSING", "FAILED"])
+def test_non_completed_idempotency_record_conflicts(status) -> None:
+    record = SimpleNamespace(
+        request_hash="hash", processing_status=status, response_snapshot_json=None,
+    )
+    with pytest.raises(AppException) as exc:
+        incident_close._replay(record, "hash")
+    assert exc.value.code == "INCIDENT_IDEMPOTENCY_CONFLICT"
+
+
+def test_idempotency_hash_mismatch_conflicts() -> None:
+    record = SimpleNamespace(
+        request_hash="other", processing_status="COMPLETED",
+        response_snapshot_json={"data": {}, "message": "완료"},
+    )
+    with pytest.raises(AppException) as exc:
+        incident_close._replay(record, "hash")
+    assert exc.value.code == "INCIDENT_IDEMPOTENCY_CONFLICT"
+
+
+def test_integrity_race_replays_completed_record() -> None:
+    incident, _, _ = objects()
+    user = actor()
+    request_hash = incident_close._request_hash(
+        user.user.public_id, incident.public_id, "FIELD_ACTION_COMPLETED",
+        "현장 조치 확인", 10,
+    )
+    record = SimpleNamespace(
+        request_hash=request_hash, processing_status="COMPLETED",
+        response_snapshot_json={"data": {"status": "CLOSED"}, "message": "완료"},
+    )
+    db = FakeDb([None, record], integrity_flush_at=1)
+    result = execute(db, incident, user)
+    assert result.data == {"status": "CLOSED"}
+    assert db.rollback_count == 1 and db.commit_count == 0
