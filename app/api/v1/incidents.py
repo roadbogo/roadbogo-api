@@ -29,7 +29,8 @@ from app.schemas.incident_decision import (
     IncidentDecisionRequest,
     IncidentDecisionResultData,
 )
-from app.services import incident_command, incident_decision, incident_query
+from app.schemas.incident_close import IncidentCloseData, IncidentCloseRequest
+from app.services import incident_close, incident_command, incident_decision, incident_query
 
 router = APIRouter(prefix="/incidents", tags=["incidents"])
 IncidentPermission = Annotated[
@@ -46,6 +47,9 @@ ReviewPermission = Annotated[
 ]
 DecisionPermission = Annotated[
     CurrentUser, Depends(require_permissions("INCIDENT.DECIDE"))
+]
+ClosePermission = Annotated[
+    CurrentUser, Depends(require_permissions("INCIDENT.CLOSE"))
 ]
 
 
@@ -262,6 +266,35 @@ def decide_incident(
         incident_public_id=str(incident_public_id),
         decision_type=payload.decision_type,
         decision_reason=payload.decision_reason,
+        expected_version_no=payload.expected_version_no,
+        idempotency_key=str(idempotency_key),
+        current_user=current_user,
+        trace_id=request.state.trace_id,
+    )
+    return success_response(
+        data=result.data,
+        message=result.message,
+        trace_id=request.state.trace_id,
+    )
+
+
+@router.post(
+    "/{incident_public_id}/close",
+    response_model=SuccessResponse[IncidentCloseData],
+)
+def close_incident(
+    incident_public_id: UUID,
+    payload: IncidentCloseRequest,
+    request: Request,
+    current_user: ClosePermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    result = incident_close.execute(
+        db,
+        incident_public_id=str(incident_public_id),
+        closure_code=payload.closure_code,
+        closure_note=payload.closure_note,
         expected_version_no=payload.expected_version_no,
         idempotency_key=str(idempotency_key),
         current_user=current_user,

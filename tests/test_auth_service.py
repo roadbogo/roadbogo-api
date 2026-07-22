@@ -1010,6 +1010,27 @@ def test_collect_user_summary_deduplicates_and_serializes_profile(monkeypatch) -
     assert "organization_id" not in dumped
 
 
+def test_collect_user_summary_uses_only_active_roles() -> None:
+    user = active_user()
+    statements = []
+
+    class ActiveRoleDb:
+        def execute(self, statement):
+            statements.append(statement)
+            return QueryResult(rows=[
+                ("CONTROLLER", "INCIDENT.READ_ALL"),
+                ("CONTROL_MANAGER", "INCIDENT.CLOSE"),
+                ("CONTROL_MANAGER", "INCIDENT.CLOSE"),
+            ])
+
+    summary = auth_service.collect_user_summary(ActiveRoleDb(), user)
+
+    sql = str(statements[0])
+    assert "roles.is_active =" in sql
+    assert summary.roles == ["CONTROLLER", "CONTROL_MANAGER"]
+    assert summary.permissions == ["INCIDENT.CLOSE", "INCIDENT.READ_ALL"]
+
+
 def test_collect_user_summary_allows_missing_phone_key_when_phone_is_empty() -> None:
     user = active_user()
     user.phone_encrypted = None

@@ -184,7 +184,10 @@ def collect_user_summary(db: Session, user: User) -> UserSummary:
         .join(Role, Role.role_id == UserRole.role_id)
         .outerjoin(RolePermission, RolePermission.role_id == Role.role_id)
         .outerjoin(Permission, Permission.permission_id == RolePermission.permission_id)
-        .where(UserRole.user_id == user.user_id)
+        .where(
+            UserRole.user_id == user.user_id,
+            Role.is_active == 1,
+        )
         .order_by(Role.role_code, Permission.permission_code)
     ).all()
 
