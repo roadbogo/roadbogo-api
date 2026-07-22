@@ -208,7 +208,12 @@ def execute(
                     {"current_status": incident.incident_status, "requested_status": config.incident_to},
                 )
 
-        dispatch_before = (dispatch.dispatch_status, dispatch.version_no, getattr(dispatch, config.timestamp_field))
+        dispatch_before = (
+            dispatch.dispatch_status,
+            dispatch.version_no,
+            dispatch.status_change_method,
+            getattr(dispatch, config.timestamp_field),
+        )
         incident_before = (incident.incident_status, incident.version_no)
         dispatch.dispatch_status = config.dispatch_to
         dispatch.version_no += 1
@@ -289,7 +294,12 @@ def execute(
     except Exception:
         db.rollback()
         if dispatch is not None and dispatch_before is not None:
-            dispatch.dispatch_status, dispatch.version_no, timestamp = dispatch_before
+            (
+                dispatch.dispatch_status,
+                dispatch.version_no,
+                dispatch.status_change_method,
+                timestamp,
+            ) = dispatch_before
             setattr(dispatch, config.timestamp_field, timestamp)
         if incident is not None and incident_before is not None:
             incident.incident_status, incident.version_no = incident_before
