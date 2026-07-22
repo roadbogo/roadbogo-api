@@ -15,12 +15,13 @@ from app.schemas.dispatch import (
     DispatchAcceptData,
     DispatchDetailData,
     DispatchMineData,
+    DispatchProgressData,
     DispatchRejectRequest,
     DispatchRejectData,
     DispatchStatus,
     DispatchVersionRequest,
 )
-from app.services import dispatch_assignment, dispatch_command, dispatch_query
+from app.services import dispatch_assignment, dispatch_command, dispatch_progress, dispatch_query
 
 router = APIRouter(tags=["dispatches"])
 DispatchPermission = Annotated[
@@ -133,6 +134,89 @@ def reject_dispatch(
         command="reject", dispatch_public_id=dispatch_public_id, payload=payload,
         request=request, current_user=current_user,
         idempotency_key=idempotency_key, db=db,
+    )
+
+
+def _progress_response(
+    *, command: str, dispatch_public_id: UUID,
+    payload: DispatchVersionRequest, request: Request,
+    current_user: CurrentUser, idempotency_key: UUID, db: Session,
+):
+    result = dispatch_progress.execute(
+        db,
+        command=command,
+        dispatch_public_id=str(dispatch_public_id),
+        expected_version_no=payload.expected_version_no,
+        idempotency_key=str(idempotency_key),
+        current_user=current_user,
+        trace_id=request.state.trace_id,
+    )
+    return success_response(
+        data=result.data, message=result.message, trace_id=request.state.trace_id
+    )
+
+
+@router.post(
+    "/dispatches/{dispatch_public_id}/depart",
+    response_model=SuccessResponse[DispatchProgressData],
+)
+def depart_dispatch(
+    dispatch_public_id: UUID, payload: DispatchVersionRequest, request: Request,
+    current_user: DispatchUpdateOwnPermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    return _progress_response(
+        command="depart", dispatch_public_id=dispatch_public_id, payload=payload,
+        request=request, current_user=current_user, idempotency_key=idempotency_key, db=db,
+    )
+
+
+@router.post(
+    "/dispatches/{dispatch_public_id}/en-route",
+    response_model=SuccessResponse[DispatchProgressData],
+)
+def en_route_dispatch(
+    dispatch_public_id: UUID, payload: DispatchVersionRequest, request: Request,
+    current_user: DispatchUpdateOwnPermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    return _progress_response(
+        command="en-route", dispatch_public_id=dispatch_public_id, payload=payload,
+        request=request, current_user=current_user, idempotency_key=idempotency_key, db=db,
+    )
+
+
+@router.post(
+    "/dispatches/{dispatch_public_id}/arrive",
+    response_model=SuccessResponse[DispatchProgressData],
+)
+def arrive_dispatch(
+    dispatch_public_id: UUID, payload: DispatchVersionRequest, request: Request,
+    current_user: DispatchUpdateOwnPermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    return _progress_response(
+        command="arrive", dispatch_public_id=dispatch_public_id, payload=payload,
+        request=request, current_user=current_user, idempotency_key=idempotency_key, db=db,
+    )
+
+
+@router.post(
+    "/dispatches/{dispatch_public_id}/start-action",
+    response_model=SuccessResponse[DispatchProgressData],
+)
+def start_action_dispatch(
+    dispatch_public_id: UUID, payload: DispatchVersionRequest, request: Request,
+    current_user: DispatchUpdateOwnPermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    return _progress_response(
+        command="start-action", dispatch_public_id=dispatch_public_id, payload=payload,
+        request=request, current_user=current_user, idempotency_key=idempotency_key, db=db,
     )
 
 
