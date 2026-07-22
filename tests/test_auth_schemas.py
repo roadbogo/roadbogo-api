@@ -6,6 +6,7 @@ from app.schemas.auth import (
     PasswordResetConfirmRequest,
     RegisterRequest,
     UpdateMeRequest,
+    WithdrawMeRequest,
 )
 
 
@@ -63,3 +64,14 @@ def test_update_me_request_requires_allowed_fields() -> None:
 
     with pytest.raises(ValidationError):
         UpdateMeRequest(email="user@example.com")
+
+
+def test_withdraw_me_request_contract() -> None:
+    assert WithdrawMeRequest(current_password="password").current_password == "password"
+
+    for payload in ({}, {"current_password": ""}, {"current_password": "x" * 129}):
+        with pytest.raises(ValidationError):
+            WithdrawMeRequest(**payload)
+
+    with pytest.raises(ValidationError):
+        WithdrawMeRequest(current_password="password", user_id=1)

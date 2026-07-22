@@ -116,6 +116,74 @@ def test_public_register_is_in_openapi() -> None:
     assert "/api/v1/auth/register" in response.json()["paths"]
 
 
+def test_withdraw_me_api_success_and_cookie_deletion(monkeypatch) -> None:
+    app = create_app()
+    current_user = CurrentUser(
+        user=DummyUser(),
+        session=DummySession(),
+        summary=user_summary(),
+    )
+    calls = []
+
+    def fake_withdraw(db, authenticated_user, payload, *, trace_id):
+        calls.append((db, authenticated_user, payload.current_password, trace_id))
+
+    monkeypatch.setattr(auth_api.auth_service, "withdraw_current_user", fake_withdraw)
+    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_current_user] = lambda: current_user
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/auth/me/withdraw",
+        json={"current_password": "current-password"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] is None
+    assert response.json()["message"] == "회원 탈퇴가 완료되었습니다."
+    assert calls and calls[0][1] is current_user
+    assert "max-age=0" in response.headers["set-cookie"].lower()
+    assert "current-password" not in response.text
+    assert "user_id" not in response.text
+
+
+def test_withdraw_me_api_auth_validation_and_error_envelopes(monkeypatch) -> None:
+    app = create_app()
+    app.dependency_overrides[get_db] = lambda: object()
+    client = TestClient(app)
+    no_auth = client.post(
+        "/api/v1/auth/me/withdraw", json={"current_password": "password"}
+    )
+
+    current_user = CurrentUser(
+        user=DummyUser(), session=DummySession(), summary=user_summary()
+    )
+    app.dependency_overrides[get_current_user] = lambda: current_user
+    invalid = [
+        client.post("/api/v1/auth/me/withdraw"),
+        client.post("/api/v1/auth/me/withdraw", json={"current_password": ""}),
+        client.post("/api/v1/auth/me/withdraw", json={"current_password": "x" * 129}),
+        client.post(
+            "/api/v1/auth/me/withdraw",
+            json={"current_password": "password", "user_id": 1},
+        ),
+    ]
+
+    def raise_error(db, authenticated_user, payload, *, trace_id):
+        raise AppException(401, "AUTH_CURRENT_PASSWORD_INVALID", "현재 비밀번호가 일치하지 않습니다.")
+
+    monkeypatch.setattr(auth_api.auth_service, "withdraw_current_user", raise_error)
+    password_error = client.post(
+        "/api/v1/auth/me/withdraw", json={"current_password": "wrong"}
+    )
+
+    assert no_auth.status_code == 401
+    assert {response.status_code for response in invalid} == {422}
+    assert password_error.status_code == 401
+    assert password_error.json()["error"]["code"] == "AUTH_CURRENT_PASSWORD_INVALID"
+    assert "/api/v1/auth/me/withdraw" in client.get("/openapi.json").json()["paths"]
+
+
 @pytest.mark.parametrize(
     "field",
     [

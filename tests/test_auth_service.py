@@ -7,7 +7,14 @@ from sqlalchemy.exc import IntegrityError
 from app.core.config import Settings
 from app.core.security import hash_password, hash_password_reset_token, hash_refresh_token
 from app.models.auth import Organization, Role, User, UserRole, UserSession
-from app.schemas.auth import LoginRequest, PasswordResetConfirmRequest, RegisterRequest, UpdateMeRequest
+from app.models.notification import AuditLog, EventOutbox
+from app.schemas.auth import (
+    LoginRequest,
+    PasswordResetConfirmRequest,
+    RegisterRequest,
+    UpdateMeRequest,
+    WithdrawMeRequest,
+)
 from app.services import auth as auth_service
 
 
@@ -33,6 +40,230 @@ class FakeDb:
 
     def commit(self):
         self.committed = True
+
+
+class WithdrawalScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def first(self):
+        return self.value
+
+    def all(self):
+        return self.value
+
+
+class WithdrawalDb:
+    def __init__(
+        self,
+        user,
+        roles,
+        *,
+        fail_add=False,
+        fail_flush=False,
+        fail_commit=False,
+        fail_update=False,
+    ):
+        self.scalar_values = [user, roles]
+        self.fail_add = fail_add
+        self.fail_flush = fail_flush
+        self.fail_commit = fail_commit
+        self.fail_update = fail_update
+        self.statements = []
+        self.added = []
+        self.flush_count = self.commit_count = self.rollback_count = 0
+
+    def scalars(self, statement):
+        self.statements.append(statement)
+        return WithdrawalScalarResult(self.scalar_values.pop(0))
+
+    def execute(self, statement):
+        self.statements.append(statement)
+        if self.fail_update:
+            raise RuntimeError("update failed")
+        return object()
+
+    def add(self, value):
+        if self.fail_add:
+            raise RuntimeError("add failed")
+        self.added.append(value)
+
+    def flush(self):
+        self.flush_count += 1
+        if self.fail_flush:
+            raise RuntimeError("flush failed")
+
+    def commit(self):
+        self.commit_count += 1
+        if self.fail_commit:
+            raise RuntimeError("commit failed")
+
+    def rollback(self):
+        self.rollback_count += 1
+
+
+def withdrawal_user(**overrides):
+    values = {
+        "user_id": 11,
+        "public_id": "11111111-1111-1111-1111-111111111111",
+        "email": "real@example.com",
+        "password_hash": hash_password("current-password"),
+        "user_name": "Real Name",
+        "account_status": "ACTIVE",
+        "deactivated_at": None,
+        "deactivated_by_user_id": None,
+        "deleted_at": None,
+        "phone_encrypted": b"encrypted-phone",
+        "password_reset_token_hash": "token-hash",
+        "password_reset_token_expires_at": datetime(2026, 8, 1),
+    }
+    values.update(overrides)
+    return User(**values)
+
+
+def withdrawal_current_user(user):
+    return type(
+        "AuthenticatedUser",
+        (),
+        {"user": type("AuthenticatedUserModel", (), {
+            "user_id": user.user_id, "public_id": user.public_id
+        })()},
+    )()
+
+
+def test_withdraw_current_user_anonymizes_revokes_sessions_and_audits(monkeypatch) -> None:
+    user = withdrawal_user()
+    original_hash = user.password_hash
+    db = WithdrawalDb(user, ["GENERAL_USER"])
+    generated = []
+    monkeypatch.setattr(auth_service.secrets, "token_urlsafe", lambda size: generated.append(size) or "z" * 43)
+
+    auth_service.withdraw_current_user(
+        db,
+        withdrawal_current_user(user),
+        WithdrawMeRequest(current_password="current-password"),
+        trace_id="trace-id",
+    )
+
+    lock_statement = db.statements[0]
+    role_statement = db.statements[1]
+    session_statement = db.statements[2]
+    assert lock_statement._for_update_arg is not None
+    assert lock_statement.get_execution_options()["populate_existing"] is True
+    assert "roles.is_active" in str(role_statement)
+    assert user.account_status == "INACTIVE"
+    assert user.deactivated_at == user.deleted_at
+    assert user.deactivated_by_user_id == user.user_id
+    assert user.email == f"withdrawn+{user.public_id}@roadbogo.invalid"
+    assert len(user.email) <= 254
+    assert user.user_name == "탈퇴한 사용자" and user.phone_encrypted is None
+    assert user.password_hash != original_hash and user.password_hash.startswith("$argon2")
+    assert generated == [32]
+    assert user.password_reset_token_hash is None
+    assert user.password_reset_token_expires_at is None
+    assert "ACCOUNT_WITHDRAWAL" in str(session_statement.compile().params.values())
+    audit = next(value for value in db.added if isinstance(value, AuditLog))
+    assert audit.action_code == "AUTH.ACCOUNT_WITHDRAW"
+    assert audit.before_json == {"account_status": "ACTIVE", "deleted": False}
+    assert audit.after_json == {"account_status": "INACTIVE", "deleted": True}
+    assert "real@example.com" not in repr((audit.before_json, audit.after_json))
+    assert not any(isinstance(value, EventOutbox) for value in db.added)
+    assert db.commit_count == 1
+
+
+@pytest.mark.parametrize(
+    ("roles", "expected_code"),
+    [
+        ([], "AUTH_WITHDRAWAL_NOT_ALLOWED"),
+        (["CONTROLLER"], "AUTH_WITHDRAWAL_NOT_ALLOWED"),
+        (["GENERAL_USER", "CONTROLLER"], "AUTH_WITHDRAWAL_NOT_ALLOWED"),
+        (["GENERAL_USER", "RESPONDER"], "AUTH_WITHDRAWAL_NOT_ALLOWED"),
+        (["SYSTEM_ADMIN"], "AUTH_WITHDRAWAL_NOT_ALLOWED"),
+    ],
+)
+def test_withdraw_current_user_rejects_non_general_user_roles(roles, expected_code) -> None:
+    user = withdrawal_user()
+    db = WithdrawalDb(user, roles)
+
+    with pytest.raises(Exception) as error:
+        auth_service.withdraw_current_user(
+            db,
+            withdrawal_current_user(user),
+            WithdrawMeRequest(current_password="current-password"),
+            trace_id="trace-id",
+        )
+
+    assert error.value.code == expected_code
+    assert db.rollback_count == 1 and db.commit_count == 0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"account_status": "INACTIVE"},
+        {"deleted_at": datetime(2026, 7, 22)},
+        {"public_id": "22222222-2222-2222-2222-222222222222"},
+    ],
+)
+def test_withdraw_current_user_revalidates_locked_identity_and_status(overrides) -> None:
+    authenticated = withdrawal_user()
+    locked = withdrawal_user(**overrides)
+    db = WithdrawalDb(locked, ["GENERAL_USER"])
+
+    with pytest.raises(Exception) as error:
+        auth_service.withdraw_current_user(
+            db,
+            withdrawal_current_user(authenticated),
+            WithdrawMeRequest(current_password="current-password"),
+            trace_id="trace-id",
+        )
+
+    assert error.value.code == "AUTH_ACCOUNT_UNAVAILABLE"
+
+
+def test_withdraw_current_user_rejects_wrong_password_without_exposure() -> None:
+    user = withdrawal_user()
+    db = WithdrawalDb(user, ["GENERAL_USER"])
+    secret = "wrong-current-password"
+
+    with pytest.raises(Exception) as error:
+        auth_service.withdraw_current_user(
+            db,
+            withdrawal_current_user(user),
+            WithdrawMeRequest(current_password=secret),
+            trace_id="trace-id",
+        )
+
+    assert error.value.code == "AUTH_CURRENT_PASSWORD_INVALID"
+    assert secret not in repr(error.value)
+    assert user.account_status == "ACTIVE" and user.email == "real@example.com"
+
+
+@pytest.mark.parametrize("failure", ["update", "add", "flush", "commit"])
+def test_withdraw_current_user_failure_rolls_back_and_restores_user(failure) -> None:
+    user = withdrawal_user()
+    db = WithdrawalDb(
+        user,
+        ["GENERAL_USER"],
+        fail_update=failure == "update",
+        fail_add=failure == "add",
+        fail_flush=failure == "flush",
+        fail_commit=failure == "commit",
+    )
+
+    with pytest.raises(RuntimeError):
+        auth_service.withdraw_current_user(
+            db,
+            withdrawal_current_user(user),
+            WithdrawMeRequest(current_password="current-password"),
+            trace_id="trace-id",
+        )
+
+    assert db.rollback_count == 1
+    assert user.account_status == "ACTIVE"
+    assert user.email == "real@example.com"
+    assert user.user_name == "Real Name"
+    assert user.deleted_at is None
 
 
 def test_password_reset_confirm_hashes_password_and_revokes_sessions() -> None:
