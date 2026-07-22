@@ -12,6 +12,8 @@ from app.schemas.common import SuccessResponse
 from app.schemas.dispatch import (
     DispatchAssignmentData,
     DispatchAssignmentRequest,
+    DispatchCompleteActionRequest,
+    DispatchCompletionData,
     DispatchAcceptData,
     DispatchDetailData,
     DispatchMineData,
@@ -21,7 +23,13 @@ from app.schemas.dispatch import (
     DispatchStatus,
     DispatchVersionRequest,
 )
-from app.services import dispatch_assignment, dispatch_command, dispatch_progress, dispatch_query
+from app.services import (
+    dispatch_assignment,
+    dispatch_command,
+    dispatch_completion,
+    dispatch_progress,
+    dispatch_query,
+)
 
 router = APIRouter(tags=["dispatches"])
 DispatchPermission = Annotated[
@@ -217,6 +225,33 @@ def start_action_dispatch(
     return _progress_response(
         command="start-action", dispatch_public_id=dispatch_public_id, payload=payload,
         request=request, current_user=current_user, idempotency_key=idempotency_key, db=db,
+    )
+
+
+@router.post(
+    "/dispatches/{dispatch_public_id}/complete-action",
+    response_model=SuccessResponse[DispatchCompletionData],
+)
+def complete_dispatch_action(
+    dispatch_public_id: UUID,
+    payload: DispatchCompleteActionRequest,
+    request: Request,
+    current_user: DispatchUpdateOwnPermission,
+    idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+):
+    result = dispatch_completion.execute(
+        db,
+        dispatch_public_id=str(dispatch_public_id),
+        expected_version_no=payload.expected_version_no,
+        action_type=payload.action_type,
+        action_detail=payload.action_detail,
+        idempotency_key=str(idempotency_key),
+        current_user=current_user,
+        trace_id=request.state.trace_id,
+    )
+    return success_response(
+        data=result.data, message=result.message, trace_id=request.state.trace_id
     )
 
 
