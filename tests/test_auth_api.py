@@ -185,6 +185,39 @@ def test_withdraw_me_api_auth_validation_and_error_envelopes(monkeypatch) -> Non
 
 
 @pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("AUTH_WITHDRAWAL_NOT_ALLOWED", "운영 계정은 본인 회원탈퇴를 이용할 수 없습니다."),
+        ("AUTH_ACCOUNT_UNAVAILABLE", "Account is unavailable."),
+    ],
+)
+def test_withdraw_me_api_preserves_service_error_envelope(monkeypatch, code, message) -> None:
+    app = create_app()
+    current_user = CurrentUser(
+        user=DummyUser(), session=DummySession(), summary=user_summary()
+    )
+    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_current_user] = lambda: current_user
+    secret = "current-password-secret"
+
+    def raise_error(db, authenticated_user, payload, *, trace_id):
+        raise AppException(403, code, message)
+
+    monkeypatch.setattr(auth_api.auth_service, "withdraw_current_user", raise_error)
+    response = TestClient(app).post(
+        "/api/v1/auth/me/withdraw", json={"current_password": secret}
+    )
+    body = response.json()
+
+    assert response.status_code == 403
+    assert body["success"] is False
+    assert body["error"]["code"] == code
+    assert body["trace_id"]
+    assert secret not in response.text
+    assert "user_id" not in response.text
+
+
+@pytest.mark.parametrize(
     "field",
     [
         "role",

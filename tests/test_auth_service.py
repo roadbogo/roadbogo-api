@@ -63,19 +63,24 @@ class WithdrawalDb:
         fail_flush=False,
         fail_commit=False,
         fail_update=False,
+        refreshed_public_id=None,
     ):
         self.scalar_values = [user, roles]
         self.fail_add = fail_add
         self.fail_flush = fail_flush
         self.fail_commit = fail_commit
         self.fail_update = fail_update
+        self.refreshed_public_id = refreshed_public_id
         self.statements = []
         self.added = []
         self.flush_count = self.commit_count = self.rollback_count = 0
 
     def scalars(self, statement):
         self.statements.append(statement)
-        return WithdrawalScalarResult(self.scalar_values.pop(0))
+        value = self.scalar_values.pop(0)
+        if self.refreshed_public_id is not None and len(self.statements) == 1:
+            value.public_id = self.refreshed_public_id
+        return WithdrawalScalarResult(value)
 
     def execute(self, statement):
         self.statements.append(statement)
@@ -150,6 +155,8 @@ def test_withdraw_current_user_anonymizes_revokes_sessions_and_audits(monkeypatc
     session_statement = db.statements[2]
     assert lock_statement._for_update_arg is not None
     assert lock_statement.get_execution_options()["populate_existing"] is True
+    assert "users.user_id" in str(lock_statement)
+    assert "users.public_id" in str(lock_statement)
     assert "roles.is_active" in str(role_statement)
     assert user.account_status == "INACTIVE"
     assert user.deactivated_at == user.deleted_at
@@ -219,6 +226,34 @@ def test_withdraw_current_user_revalidates_locked_identity_and_status(overrides)
         )
 
     assert error.value.code == "AUTH_ACCOUNT_UNAVAILABLE"
+
+
+def test_withdraw_current_user_uses_primitive_identity_snapshot() -> None:
+    user = withdrawal_user()
+    original_public_id = user.public_id
+    current_user = type("CurrentUser", (), {"user": user})()
+    db = WithdrawalDb(
+        user,
+        ["GENERAL_USER"],
+        refreshed_public_id="33333333-3333-3333-3333-333333333333",
+    )
+
+    with pytest.raises(Exception) as error:
+        auth_service.withdraw_current_user(
+            db,
+            current_user,
+            WithdrawMeRequest(current_password="current-password"),
+            trace_id="trace-id",
+        )
+
+    statement = db.statements[0]
+    assert current_user.user is user
+    assert user.public_id != original_public_id
+    assert error.value.code == "AUTH_ACCOUNT_UNAVAILABLE"
+    assert statement._for_update_arg is not None
+    assert statement.get_execution_options()["populate_existing"] is True
+    assert "users.user_id" in str(statement)
+    assert "users.public_id" in str(statement)
 
 
 def test_withdraw_current_user_rejects_wrong_password_without_exposure() -> None:

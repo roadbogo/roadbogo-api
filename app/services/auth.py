@@ -292,16 +292,22 @@ def withdraw_current_user(
 ) -> None:
     user = None
     previous_values = None
+    expected_user_id = current_user.user.user_id
+    expected_public_id = current_user.user.public_id
     try:
         user = db.scalars(
             select(User)
-            .where(User.user_id == current_user.user.user_id)
+            .where(
+                User.user_id == expected_user_id,
+                User.public_id == expected_public_id,
+            )
             .with_for_update()
             .execution_options(populate_existing=True)
         ).first()
         if (
             user is None
-            or user.public_id != current_user.user.public_id
+            or user.user_id != expected_user_id
+            or user.public_id != expected_public_id
             or user.account_status != ACTIVE
             or user.deleted_at is not None
         ):
